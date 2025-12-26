@@ -1,4 +1,6 @@
 import io
+import os
+import platform
 import time
 import uuid
 from typing import List
@@ -10,72 +12,74 @@ from docx import Document
 
 from app.models.schemas import OCRResponse, PageText
 from app.services import file_service
+from app.core.config import settings
 
 
 # ---------------------------------------------------------
-# Tesseract configuration (Windows)
+# Tesseract configuration (Windows-safe)
 # ---------------------------------------------------------
 
-# If Tesseract is not in PATH, set the full path here:
-# Change this if your install location is different
-pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+def configure_tesseract():
+    """
+    1) If env var TESSERACT_CMD is set, use it
+    2) Else on Windows, fallback to default install path
+    3) Else rely on PATH (Linux/macOS/Docker)
+    """
+    env_cmd = os.getenv("TESSERACT_CMD")
+    if env_cmd and os.path.exists(env_cmd):
+        pytesseract.pytesseract.tesseract_cmd = env_cmd
+        return
+
+    if platform.system().lower().startswith("win"):
+        win_default = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        if os.path.exists(win_default):
+            pytesseract.pytesseract.tesseract_cmd = win_default
+            return
+
+
+configure_tesseract()
 
 
 def ocr_image(image: Image.Image) -> str:
     """
     OCR for a single image using Tesseract, with simple preprocessing.
-    Works for both document-style and general images reasonably well.
     """
-    # 1) Convert to grayscale
     image = image.convert("L")
 
-    # 2) Upscale small images to help Tesseract
     w, h = image.size
     max_side = max(w, h)
     if max_side < 1000:
         scale = 1000 / max_side
-        new_size = (int(w * scale), int(h * scale))
-        image = image.resize(new_size, Image.LANCZOS)
+        image = image.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
 
-    # 3) Auto-contrast and slight sharpen
     image = ImageOps.autocontrast(image)
     image = image.filter(ImageFilter.SHARPEN)
 
-    # 4) OCR with Tesseract
     text = pytesseract.image_to_string(image)
     return text.strip()
 
 
-# ---------------------------------------------------------
-# PDF / DOCX handlers
-# ---------------------------------------------------------
-
 def extract_from_pdf(file_bytes: bytes) -> List[PageText]:
     """
-    Hybrid PDF extractor:
-    1) Try to read text layer with pypdfium2.
-    2) If page has no usable text, render to image and run Tesseract.
+    Hybrid: try PDF text layer, fallback to OCR per page if empty.
     """
     pdf = pdfium.PdfDocument(file_bytes)
     pages: List[PageText] = []
 
-    n_pages = len(pdf)
-    for i in range(n_pages):
+    for i in range(len(pdf)):
         page = pdf[i]
 
-        # --- Step 1: try direct text extraction ---
         text = ""
         try:
             textpage = page.get_textpage()
-            text = textpage.get_text_range() or ""
+            text = (textpage.get_text_range() or "").strip()
         except Exception:
             text = ""
 
-        text = text.strip()
-
-        # --- Step 2: fallback to OCR if no meaningful text ---
         if not text:
-            bitmap = page.render(scale=2.0)  # ~144 dpi
+            # 300 DPI render
+            scale = 300 / 72.0
+            bitmap = page.render(scale=scale)
             pil_image = bitmap.to_pil()
             text = ocr_image(pil_image)
 
@@ -85,40 +89,38 @@ def extract_from_pdf(file_bytes: bytes) -> List[PageText]:
 
 
 def extract_from_image(file_bytes: bytes) -> List[PageText]:
-    """
-    Handle JPG/PNG/TIFF… files with Tesseract.
-    """
     image = Image.open(io.BytesIO(file_bytes))
     text = ocr_image(image)
     return [PageText(page_number=1, text=text)]
 
 
 def extract_from_docx(file_bytes: bytes) -> List[PageText]:
-    """
-    DOCX doesn't need OCR, we can read text directly.
-    Treat the whole doc as a single 'page' in Phase 1.
-    """
     doc = Document(io.BytesIO(file_bytes))
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
     text = "\n".join(paragraphs)
     return [PageText(page_number=1, text=text)]
 
 
-# ---------------------------------------------------------
-# Main entry used by FastAPI route
-# ---------------------------------------------------------
-
-def process_file(file_bytes: bytes, filename: str, document_type: str) -> OCRResponse:
+def process_file(
+    file_bytes: bytes,
+    filename: str,
+    document_type: str,
+    *,
+    zero_retention: bool | None = None,
+) -> OCRResponse:
     """
-    Decide by extension which extractor to use,
-    then assemble a standard OCRResponse object.
+    Main OCR function.
+    IMPORTANT:
+    - If zero_retention=True => DO NOT store the file anywhere.
+    - If zero_retention=False => store only ONE copy by filename (overwrite).
     """
     start = time.time()
     job_id = str(uuid.uuid4())
 
-    ext = ""
-    if "." in filename:
-        ext = filename.rsplit(".", 1)[-1].lower()
+    if zero_retention is None:
+        zero_retention = settings.ZERO_RETENTION_DEFAULT
+
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
     if ext == "pdf":
         pages = extract_from_pdf(file_bytes)
@@ -130,11 +132,15 @@ def process_file(file_bytes: bytes, filename: str, document_type: str) -> OCRRes
         raise ValueError(f"Unsupported file type: .{ext or 'unknown'}")
 
     full_text = "\n\n".join(p.text for p in pages)
-
     processing_time_ms = int((time.time() - start) * 1000)
 
-    # Optional: store original file for debugging / history
-    file_service.save_file(job_id, filename, file_bytes)
+    # ✅ FIX #1: Only store when retention is OFF
+    if not zero_retention:
+        file_service.save_unique_by_name(filename, file_bytes)
+    else:
+        # extra safety: if something old exists with same filename, remove it
+        # (optional, but matches your "no retention" expectation)
+        file_service.delete_if_exists(filename)
 
     return OCRResponse(
         job_id=job_id,
@@ -148,5 +154,6 @@ def process_file(file_bytes: bytes, filename: str, document_type: str) -> OCRRes
             "num_pages": len(pages),
             "processing_time_ms": processing_time_ms,
             "engine": "tesseract",
+            "zero_retention": bool(zero_retention),
         },
     )

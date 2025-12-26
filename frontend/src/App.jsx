@@ -1,10 +1,12 @@
 import { useState, useRef } from "react";
-import { uploadDocument } from "./api";
+import { uploadDocuments } from "./api";
 
 function App() {
-  const [file, setFile] = useState(null);
+  const [files, setFiles] = useState([]);
   const [docType, setDocType] = useState("generic");
-  const [result, setResult] = useState(null);
+  const [zeroRetention, setZeroRetention] = useState(true);
+  const [batchResult, setBatchResult] = useState(null);
+  const [activeIdx, setActiveIdx] = useState(0); // which file output to display
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState("full"); // "full" or "pages"
   const [error, setError] = useState(null);
@@ -12,19 +14,20 @@ function App() {
   const utteranceRef = useRef(null);
 
   const handleUpload = async () => {
-    if (!file) {
-      setError("Please choose a file.");
+    if (!files.length) {
+      setError("Please choose at least 1 file.");
       return;
     }
     setError(null);
     setLoading(true);
-    setResult(null);
+    setBatchResult(null);
     setIsReading(false);
     window.speechSynthesis.cancel();
 
     try {
-      const data = await uploadDocument(file, docType);
-      setResult(data);
+      const data = await uploadDocuments(files, docType, zeroRetention);
+      setBatchResult(data);
+      setActiveIdx(0);
     } catch (err) {
       console.error(err);
       setError(
@@ -38,6 +41,8 @@ function App() {
   };
 
   const handleDownloadTxt = () => {
+    const item = batchResult?.results?.[activeIdx];
+    const result = item?.response;
     if (!result) return;
 
     const blob = new Blob([result.full_text || ""], { type: "text/plain" });
@@ -54,6 +59,8 @@ function App() {
   };
 
   const handleStartReading = () => {
+    const item = batchResult?.results?.[activeIdx];
+    const result = item?.response;
     if (!result || !result.full_text) return;
 
     if (!("speechSynthesis" in window)) {
@@ -92,14 +99,37 @@ function App() {
         <div style={{ marginTop: "12px" }}>
           <div className="label">Document file</div>
           <input
-            type="file"
-            accept=".pdf,.docx,image/*"
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
-            style={{ marginTop: "4px" }}
-          />
+  type="file"
+  multiple
+  accept=".pdf,.docx,image/*"
+  onChange={(e) => {
+    const picked = Array.from(e.target.files || []);
+
+    // ✅ Keep only ONE per filename on client side
+    const map = new Map(); // name -> File
+    for (const f of picked) {
+      if (!map.has(f.name)) map.set(f.name, f);
+      // if you want "latest wins", replace the above line with: map.set(f.name, f);
+    }
+
+    setFiles(Array.from(map.values()));
+  }}
+/>
+
           <div style={{ fontSize: "0.75rem", color: "#6b7280", marginTop: 4 }}>
             Supported: PDF, DOCX, JPG, PNG, TIFF
           </div>
+        </div>
+
+        <div style={{ marginTop: "12px" }}>
+          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <input
+              type="checkbox"
+              checked={zeroRetention}
+              onChange={(e) => setZeroRetention(e.target.checked)}
+            />
+            Zero data retention (do not save uploads)
+          </label>
         </div>
 
         <div style={{ marginTop: "12px" }}>
@@ -132,13 +162,11 @@ function App() {
           {loading ? "Processing..." : "Extract Text"}
         </button>
 
-        {result && (
+        {batchResult && (
           <div className="meta">
-            <div>File: {result.metadata?.file_name}</div>
-            <div>Type: {result.metadata?.file_type}</div>
-            <div>Pages: {result.metadata?.num_pages}</div>
-            <div>Time: {result.metadata?.processing_time_ms} ms</div>
-            <div>Engine: {result.metadata?.engine}</div>
+            <div>Files processed: {batchResult.results?.length || 0}</div>
+            <div>Zero retention: {String(batchResult.zero_retention)}</div>
+            <div>Max allowed: {batchResult.max_docs_allowed}</div>
           </div>
         )}
       </div>
@@ -146,6 +174,30 @@ function App() {
       {/* Output */}
       <div className="card">
         <h3 style={{ marginBottom: "8px" }}>OCR Output</h3>
+
+        {batchResult && batchResult.results && batchResult.results.length > 0 && (
+          <div style={{ marginBottom: 10 }}>
+            <div className="label">Select file output</div>
+            <select
+              value={activeIdx}
+              onChange={(e) => setActiveIdx(Number(e.target.value))}
+              style={{
+                marginTop: "4px",
+                padding: "6px 8px",
+                borderRadius: "6px",
+                border: "1px solid #d1d5db",
+                width: "100%",
+              }}
+            >
+              {batchResult.results.map((r, idx) => (
+                <option key={`${r.file_hash || idx}`} value={idx}>
+                  {r.filename} {r.skipped_duplicate ? "(duplicate skipped)" : ""}{" "}
+                  {r.error ? "(error)" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="tabs">
@@ -176,30 +228,38 @@ function App() {
             fontSize: "0.9rem",
           }}
         >
-          {!result && (
+          {!batchResult && (
             <span style={{ color: "#9ca3af" }}>No output yet.</span>
           )}
 
-          {result && activeTab === "full" && result.full_text}
-
-          {result && activeTab === "pages" && (
-            <>
-              {result.pages.map((p) => (
-                <div key={p.page_number} style={{ marginBottom: "12px" }}>
-                  <div
-                    style={{
-                      fontWeight: 600,
-                      fontSize: "0.8rem",
-                      marginBottom: "4px",
-                    }}
-                  >
-                    Page {p.page_number}
-                  </div>
-                  <div>{p.text}</div>
-                </div>
-              ))}
-            </>
-          )}
+          {batchResult &&
+            (() => {
+              const item = batchResult.results?.[activeIdx];
+              if (!item) return null;
+              if (item.error) return `Error: ${item.error}`;
+              if (item.skipped_duplicate) return "Duplicate file skipped.";
+              const result = item.response;
+              if (!result) return "No result.";
+              if (activeTab === "full") return result.full_text;
+              return (
+                <>
+                  {result.pages.map((p) => (
+                    <div key={p.page_number} style={{ marginBottom: "12px" }}>
+                      <div
+                        style={{
+                          fontWeight: 600,
+                          fontSize: "0.8rem",
+                          marginBottom: "4px",
+                        }}
+                      >
+                        Page {p.page_number}
+                      </div>
+                      <div>{p.text}</div>
+                    </div>
+                  ))}
+                </>
+              );
+            })()}
         </div>
 
         {/* Actions */}
@@ -208,7 +268,7 @@ function App() {
             className="button"
             style={{ marginRight: "8px" }}
             onClick={handleDownloadTxt}
-            disabled={!result}
+            disabled={!batchResult || !batchResult.results?.[activeIdx]?.response}
           >
             Download Text
           </button>
@@ -216,7 +276,7 @@ function App() {
           <button
             className="button"
             onClick={isReading ? handleStopReading : handleStartReading}
-            disabled={!result}
+            disabled={!batchResult || !batchResult.results?.[activeIdx]?.response}
           >
             {isReading ? "Stop Reading" : "Read Aloud"}
           </button>
