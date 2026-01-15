@@ -102,14 +102,20 @@ pip install --no-cache-dir --only-binary=:all: -r requirements.txt
 Set these before running the server:
 
 $env:TESSERACT_CMD="C:\Program Files\Tesseract-OCR\tesseract.exe"
+
 $env:ZERO_RETENTION_DEFAULT="true"
+
 $env:MAX_DOCS_PER_BATCH="30"
+
 $env:MAX_FILE_SIZE_MB="20"
 
 ### What these mean:
 TESSERACT_CMD → Explicit OCR engine path
+
 ZERO_RETENTION_DEFAULT=true → Files are NOT stored
+
 MAX_DOCS_PER_BATCH → Max files per upload request
+
 MAX_FILE_SIZE_MB → Protects memory usage
 
 
