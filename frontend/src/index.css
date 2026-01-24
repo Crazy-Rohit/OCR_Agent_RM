@@ -1,0 +1,249 @@
+/* ---------- Base layout ---------- */
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+  background: radial-gradient(circle at top, #e0f2fe 0, #e5e7eb 40%, #f9fafb 100%);
+  color: #0f172a;
+}
+
+/* Main wrapper that holds the two cards */
+.container {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px 16px 40px;
+}
+
+/* On wider screens, place cards side by side */
+@media (min-width: 900px) {
+  .container {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
+    gap: 20px;
+    align-items: flex-start;
+  }
+}
+
+/* ---------- Card styling ---------- */
+
+.card {
+  background: rgba(255, 255, 255, 0.95);
+  padding: 20px 22px;
+  border-radius: 16px;
+  box-shadow: 0 12px 35px rgba(15, 23, 42, 0.08);
+  margin-bottom: 20px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  backdrop-filter: blur(6px);
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease;
+}
+
+.card:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.16);
+  border-color: rgba(59, 130, 246, 0.4);
+  background: rgba(255, 255, 255, 0.98);
+}
+
+/* Titles */
+.card h2,
+.card h3 {
+  margin: 0 0 6px;
+}
+
+.card h2 {
+  font-size: 1.4rem;
+}
+
+.card h3 {
+  font-size: 1.1rem;
+}
+
+/* Small subtitle text */
+.card p {
+  margin-top: 4px;
+}
+
+/* ---------- Inputs ---------- */
+
+.label {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: #111827;
+}
+
+input[type="file"] {
+  margin-top: 6px;
+  font-size: 0.8rem;
+}
+
+input[type="file"]::-webkit-file-upload-button {
+  background: #111827;
+  color: #f9fafb;
+  border: none;
+  padding: 6px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 0.8rem;
+  margin-right: 8px;
+  transition:
+    background 0.16s ease,
+    transform 0.12s ease,
+    box-shadow 0.16s ease;
+}
+
+input[type="file"]::-webkit-file-upload-button:hover {
+  background: #1f2937;
+  transform: translateY(-1px);
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.25);
+}
+
+input[type="file"]::-webkit-file-upload-button:active {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+/* Dropdown */
+select {
+  font-size: 0.85rem;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid #d1d5db;
+  outline: none;
+  transition:
+    border-color 0.16s ease,
+    box-shadow 0.16s ease,
+    background 0.16s ease;
+}
+
+select:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.25);
+  background: #eff6ff;
+}
+
+/* ---------- Buttons ---------- */
+
+.button {
+  background: linear-gradient(135deg, #111827, #1e293b);
+  color: #f9fafb;
+  border: none;
+  padding: 10px 18px;
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition:
+    background 0.18s ease,
+    transform 0.12s ease,
+    box-shadow 0.18s ease;
+}
+
+.button:hover:not(:disabled) {
+  background: linear-gradient(135deg, #020617, #0f172a);
+  transform: translateY(-1px) translateZ(0);
+  box-shadow: 0 10px 25px rgba(15, 23, 42, 0.4);
+}
+
+.button:active:not(:disabled) {
+  transform: translateY(0);
+  box-shadow: none;
+}
+
+.button:disabled {
+  background: #9ca3af;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* ---------- Tabs ---------- */
+
+.tabs {
+  margin-top: 10px;
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 999px;
+  background: #e5e7eb;
+}
+
+.tabs button {
+  padding: 8px 16px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  margin-right: 4px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  color: #4b5563;
+  transition:
+    background 0.16s ease,
+    color 0.16s ease,
+    transform 0.12s ease;
+}
+
+.tabs button:last-child {
+  margin-right: 0;
+}
+
+.tabs button:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.tabs .active {
+  background: #ffffff;
+  color: #111827;
+  box-shadow: 0 4px 10px rgba(148, 163, 184, 0.55);
+}
+
+/* ---------- Error & meta ---------- */
+
+.error {
+  color: #b91c1c;
+  background: #fee2e2;
+  border: 1px solid #fecaca;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 0.83rem;
+  margin-top: 10px;
+}
+
+.meta {
+  font-size: 0.75rem;
+  color: #6b7280;
+  margin-top: 10px;
+  line-height: 1.5;
+}
+
+/* ---------- Output area (the big text box) ---------- */
+
+.card:nth-of-type(2) > div[style*="overflow: auto"] {
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  background: #f9fafb;
+}
+
+/* custom scrollbars for output area (WebKit-based browsers) */
+.card:nth-of-type(2) > div[style*="overflow: auto"]::-webkit-scrollbar {
+  width: 8px;
+}
+
+.card:nth-of-type(2) > div[style*="overflow: auto"]::-webkit-scrollbar-track {
+  background: #e5e7eb;
+  border-radius: 999px;
+}
+
+.card:nth-of-type(2) > div[style*="overflow: auto"]::-webkit-scrollbar-thumb {
+  background: #9ca3af;
+  border-radius: 999px;
+}
+
+.card:nth-of-type(2) > div[style*="overflow: auto"]::-webkit-scrollbar-thumb:hover {
+  background: #6b7280;
+}

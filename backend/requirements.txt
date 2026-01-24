@@ -1,0 +1,23 @@
+# -------- Core API --------
+fastapi==0.110.0
+uvicorn[standard]==0.27.1
+
+# -------- File Uploads --------
+python-multipart==0.0.9
+
+# -------- OCR & Image Processing --------
+pytesseract==0.3.10
+Pillow==10.2.0
+opencv-python-headless==4.9.0.80
+numpy==1.26.4
+
+# -------- Validation & Config --------
+pydantic==2.6.4
+python-dotenv==1.0.1
+
+# -------- Optional (recommended for prod) --------
+loguru==0.7.2
+
+
+pypdfium2
+python-docx
