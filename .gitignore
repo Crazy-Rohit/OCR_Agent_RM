@@ -10,3 +10,5 @@ frontend/dist/
 # System
 .DS_Store
 Thumbs.db
+
+backend/.venv/
