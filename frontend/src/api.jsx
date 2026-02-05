@@ -1,22 +1,27 @@
 import axios from "axios";
 
-// If backend runs on 8000 locally:
-const BASE_URL = "http://127.0.0.1:8000";
+const API_BASE = "http://127.0.0.1:8000";
 
-// Must match settings.API_V1_STR in backend (most likely "/api/v1")
-const API_PREFIX = "/api/v1";
+export async function uploadDocument(file, documentType, zeroRetention = true) {
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("document_type", documentType);
+  formData.append("zero_retention", zeroRetention ? "true" : "false");
 
-export async function uploadDocuments(files, documentType, zeroRetention, enableLayout = true) {
+  const res = await axios.post(`${API_BASE}/api/v1/ocr/extract`, formData, {
+    headers: { "Content-Type": "multipart/form-data" },
+  });
+
+  return res.data;
+}
+
+export async function uploadDocuments(files, documentType, zeroRetention = true) {
   const formData = new FormData();
   for (const f of files) formData.append("files", f);
-
   formData.append("document_type", documentType);
-  formData.append("zero_retention", String(zeroRetention));
+  formData.append("zero_retention", zeroRetention ? "true" : "false");
 
-  // ✅ Correct endpoint using API prefix
-  const url = `${BASE_URL}${API_PREFIX}/ocr/batch?enable_layout=${enableLayout ? "true" : "false"}`;
-
-  const res = await axios.post(url, formData, {
+  const res = await axios.post(`${API_BASE}/api/v1/ocr/extract-batch`, formData, {
     headers: { "Content-Type": "multipart/form-data" },
   });
 
