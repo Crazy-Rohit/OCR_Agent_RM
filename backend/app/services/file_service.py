@@ -1,6 +1,4 @@
-from __future__ import annotations
-
-import hashlib
+import os
 import re
 from pathlib import Path
 
@@ -10,17 +8,10 @@ from app.core.config import settings
 BASE_UPLOAD_DIR = Path(settings.UPLOAD_DIR)
 BASE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-# Backward-compat hook (some code refers to this constant)
-MAX_DOCS_ALLOWED = int(getattr(settings, "MAX_DOCS_PER_BATCH", 20))
-
-
-def hash_bytes(data: bytes) -> str:
-    """Stable content hash for dedupe/bookkeeping."""
-    return hashlib.sha256(data).hexdigest()
-
 
 def sanitize_filename(filename: str) -> str:
-    """Keep filenames safe:
+    """
+    Keep filenames safe:
     - strip folders
     - remove dangerous chars
     """
@@ -30,9 +21,10 @@ def sanitize_filename(filename: str) -> str:
 
 
 def save_unique_by_name(filename: str, file_bytes: bytes) -> str:
-    """Save to uploads/<filename>.
-
-    V1 still keeps behavior simple: overwrite if same name exists.
+    """
+    Saves file to uploads/<filename>.
+    If a file with the same name already exists, overwrite it
+    so only ONE copy exists at all times.
     """
     safe = sanitize_filename(filename)
     path = BASE_UPLOAD_DIR / safe

@@ -1,166 +1,150 @@
-from __future__ import annotations
-
+import hashlib
 from typing import List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 
 from app.core.config import settings
-from app.core.telemetry import write_jsonl
-from app.models.schemas import OCRBatchItem, OCRBatchResponse
-from app.services import file_service
+from app.models.schemas import OCRResponse, OCRBatchResponse, OCRBatchItem
 from app.services.ocr_service import process_file
 
 
-router = APIRouter()
+router = APIRouter(prefix="/ocr", tags=["OCR"])
 
 
-def _enforce_max_file_size(filename: str, content: bytes) -> None:
-    max_bytes = int(settings.MAX_FILE_SIZE_MB) * 1024 * 1024
-    if len(content) > max_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail={
-                "error": "file_too_large",
-                "filename": filename,
-                "max_file_size_mb": int(settings.MAX_FILE_SIZE_MB),
-            },
-        )
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
-@router.post("/ocr")
-async def ocr_single(
-    request: Request,
+def parse_bool(val: Optional[str], default: bool) -> bool:
+    if val is None:
+        return default
+    v = str(val).strip().lower()
+    return v in {"1", "true", "yes", "y", "on"}
+
+
+@router.post("/extract", response_model=OCRResponse)
+async def extract_text(
     file: UploadFile = File(...),
     document_type: str = Form("generic"),
-    zero_retention: bool = Form(True),
-    enable_layout: bool = Query(True),
-    preprocess: Optional[bool] = Query(None),
+    zero_retention: Optional[str] = Form(None),
 ):
-    """Single-document OCR.
+    try:
+        zr = parse_bool(zero_retention, settings.ZERO_RETENTION_DEFAULT)
 
-    Backward compatible with V0: new param `preprocess` is optional.
-    """
-    request_id = getattr(request.state, "request_id", None)
-    content = await file.read()
-    _enforce_max_file_size(file.filename, content)
+        contents = await file.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty file")
 
-    write_jsonl(
-        {
-            "event": "ocr_single_start",
-            "request_id": request_id,
-            "filename": file.filename,
-            "document_type": document_type,
-            "zero_retention": bool(zero_retention),
-            "enable_layout": bool(enable_layout),
-            "preprocess": preprocess,
-            "bytes": len(content),
-        }
-    )
+        max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
+        if len(contents) > max_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File exceeds max size of {settings.MAX_FILE_SIZE_MB} MB",
+            )
 
-    resp = process_file(
-        content,
-        file.filename,
-        document_type,
-        zero_retention=zero_retention,
-        enable_layout=enable_layout,
-        preprocess=preprocess,
-        request_id=request_id,
-    )
+        return process_file(contents, file.filename or "document", document_type, zero_retention=zr)
 
-    write_jsonl(
-        {
-            "event": "ocr_single_end",
-            "request_id": request_id,
-            "filename": file.filename,
-        }
-    )
-    return resp
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/ocr/batch", response_model=OCRBatchResponse)
-async def ocr_batch(
-    request: Request,
+@router.post("/extract-batch", response_model=OCRBatchResponse)
+async def extract_batch(
     files: List[UploadFile] = File(...),
     document_type: str = Form("generic"),
-    zero_retention: bool = Form(True),
-    enable_layout: bool = Query(True),
-    preprocess: Optional[bool] = Query(None),
+    zero_retention: Optional[str] = Form(None),
 ):
-    """Batch OCR (backward compatible)."""
-    request_id = getattr(request.state, "request_id", None)
+    """
+    Batch OCR:
+    - supports many files per request
+    - skips duplicates:
+        (a) same filename in the batch
+        (b) same content hash in the batch
+    """
+    zr = parse_bool(zero_retention, settings.ZERO_RETENTION_DEFAULT)
 
-    max_docs_allowed = int(getattr(settings, "MAX_DOCS_PER_BATCH", 20))
-    if len(files) > max_docs_allowed:
+    if len(files) > settings.MAX_DOCS_PER_BATCH:
         raise HTTPException(
             status_code=400,
-            detail={
-                "error": "too_many_files",
-                "max_docs_allowed": max_docs_allowed,
-                "received": len(files),
-            },
+            detail=f"Too many files. Received {len(files)} but max allowed is {settings.MAX_DOCS_PER_BATCH}.",
         )
 
-    write_jsonl(
-        {
-            "event": "ocr_batch_start",
-            "request_id": request_id,
-            "count": len(files),
-            "document_type": document_type,
-            "zero_retention": bool(zero_retention),
-            "enable_layout": bool(enable_layout),
-            "preprocess": preprocess,
-        }
-    )
+    max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
 
+    seen_names = set()
+    seen_hashes = set()
     results: List[OCRBatchItem] = []
 
     for f in files:
-        content = await f.read()
-        _enforce_max_file_size(f.filename, content)
-        file_hash = file_service.hash_bytes(content)
+        filename = f.filename or "document"
 
         try:
-            resp = process_file(
-                content,
-                f.filename,
-                document_type,
-                zero_retention=zero_retention,
-                enable_layout=enable_layout,
-                preprocess=preprocess,
-                request_id=request_id,
-            )
+            contents = await f.read()
+            if not contents:
+                results.append(OCRBatchItem(filename=filename, file_hash="", error="Empty file"))
+                continue
+
+            if len(contents) > max_bytes:
+                results.append(
+                    OCRBatchItem(
+                        filename=filename,
+                        file_hash="",
+                        error=f"File exceeds max size of {settings.MAX_FILE_SIZE_MB} MB",
+                    )
+                )
+                continue
+
+            # --- duplicate by name ---
+            if filename in seen_names:
+                results.append(
+                    OCRBatchItem(
+                        filename=filename,
+                        file_hash="",
+                        skipped_duplicate=True,
+                        reason="duplicate_filename_in_batch",
+                    )
+                )
+                continue
+            seen_names.add(filename)
+
+            # --- duplicate by content hash ---
+            h = sha256_bytes(contents)
+            if h in seen_hashes:
+                results.append(
+                    OCRBatchItem(
+                        filename=filename,
+                        file_hash=h,
+                        skipped_duplicate=True,
+                        reason="duplicate_content_in_batch",
+                    )
+                )
+                continue
+            seen_hashes.add(h)
+
+            resp = process_file(contents, filename, document_type, zero_retention=zr)
+
             results.append(
                 OCRBatchItem(
-                    filename=f.filename,
-                    file_hash=str(file_hash),
+                    filename=filename,
+                    file_hash=h,
                     skipped_duplicate=False,
                     response=resp,
-                    error=None,
-                )
-            )
-        except Exception as e:
-            results.append(
-                OCRBatchItem(
-                    filename=f.filename,
-                    file_hash=str(file_hash),
-                    skipped_duplicate=False,
-                    response=None,
-                    error=str(e),
                 )
             )
 
-    write_jsonl(
-        {
-            "event": "ocr_batch_end",
-            "request_id": request_id,
-            "count": len(files),
-        }
-    )
+        except ValueError as ve:
+            results.append(OCRBatchItem(filename=filename, file_hash="", error=str(ve)))
+        except Exception as e:
+            results.append(OCRBatchItem(filename=filename, file_hash="", error=str(e)))
 
     return OCRBatchResponse(
         status="success",
         document_type=document_type,
-        zero_retention=bool(zero_retention),
-        max_docs_allowed=max_docs_allowed,
+        zero_retention=zr,
+        max_docs_allowed=settings.MAX_DOCS_PER_BATCH,
         results=results,
     )

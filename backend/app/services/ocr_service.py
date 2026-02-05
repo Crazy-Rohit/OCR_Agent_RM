@@ -1,40 +1,104 @@
-from __future__ import annotations
-
 import io
+import os
+import platform
 import time
 import uuid
-from typing import List, Optional
+from typing import List
 
+import pytesseract
+import pypdfium2 as pdfium
+from PIL import Image, ImageOps, ImageFilter
 from docx import Document
 
-from app.classify.document_classifier import classify_from_signals
-from app.core.config import settings
-from app.engines.tesseract_engine import TesseractEngine
 from app.models.schemas import OCRResponse, PageText
-from app.pipeline.ingest import image_to_page, pdf_to_pages
-from app.pipeline.preprocess import preprocess_image
-from app.postprocess.layout_normalizer import normalize_pages
-from app.services import file_service, layout_service
+from app.services import file_service
+from app.core.config import settings
 
 
-_ENGINE = TesseractEngine()
+# ---------------------------------------------------------
+# Tesseract configuration (Windows-safe)
+# ---------------------------------------------------------
+
+def configure_tesseract():
+    """
+    1) If env var TESSERACT_CMD is set, use it
+    2) Else on Windows, fallback to default install path
+    3) Else rely on PATH (Linux/macOS/Docker)
+    """
+    env_cmd = os.getenv("TESSERACT_CMD")
+    if env_cmd and os.path.exists(env_cmd):
+        pytesseract.pytesseract.tesseract_cmd = env_cmd
+        return
+
+    if platform.system().lower().startswith("win"):
+        win_default = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+        if os.path.exists(win_default):
+            pytesseract.pytesseract.tesseract_cmd = win_default
+            return
 
 
-def _profile_for_category(category: str) -> str:
-    if category == "screenshot":
-        return "printed"
-    if category == "scanned_pdf":
-        return "scanned"
-    if category == "handwritten_form":
-        return "handwriting_hint"
-    return "printed"
+configure_tesseract()
 
 
-def _extract_from_docx(file_bytes: bytes) -> List[PageText]:
+def ocr_image(image: Image.Image) -> str:
+    """
+    OCR for a single image using Tesseract, with simple preprocessing.
+    """
+    image = image.convert("L")
+
+    w, h = image.size
+    max_side = max(w, h)
+    if max_side < 1000:
+        scale = 1000 / max_side
+        image = image.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+    image = ImageOps.autocontrast(image)
+    image = image.filter(ImageFilter.SHARPEN)
+
+    text = pytesseract.image_to_string(image)
+    return text.strip()
+
+
+def extract_from_pdf(file_bytes: bytes) -> List[PageText]:
+    """
+    Hybrid: try PDF text layer, fallback to OCR per page if empty.
+    """
+    pdf = pdfium.PdfDocument(file_bytes)
+    pages: List[PageText] = []
+
+    for i in range(len(pdf)):
+        page = pdf[i]
+
+        text = ""
+        try:
+            textpage = page.get_textpage()
+            text = (textpage.get_text_range() or "").strip()
+        except Exception:
+            text = ""
+
+        if not text:
+            # 300 DPI render
+            scale = 300 / 72.0
+            bitmap = page.render(scale=scale)
+            pil_image = bitmap.to_pil()
+            text = ocr_image(pil_image)
+
+        pages.append(PageText(page_number=i + 1, text=text))
+
+    return pages
+
+
+def extract_from_image(file_bytes: bytes) -> List[PageText]:
+    image = Image.open(io.BytesIO(file_bytes))
+    text = ocr_image(image)
+    return [PageText(page_number=1, text=text)]
+
+
+def extract_from_docx(file_bytes: bytes) -> List[PageText]:
     doc = Document(io.BytesIO(file_bytes))
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
     text = "\n".join(paragraphs)
-    return [PageText(page_number=1, text=text, words=None, lines=None, blocks=None, tables=None)]
+    return [PageText(page_number=1, text=text)]
 
 
 def process_file(
@@ -43,17 +107,12 @@ def process_file(
     document_type: str,
     *,
     zero_retention: bool | None = None,
-    enable_layout: bool = True,
-    preprocess: Optional[bool] = None,
-    request_id: Optional[str] = None,
 ) -> OCRResponse:
-    """Main OCR entrypoint used by the API.
-
-    V1:
-    - standardized ingest + preprocessing
-    - classification in metadata
-    - deterministic layout ordering
-    - backward compatible schema
+    """
+    Main OCR function.
+    IMPORTANT:
+    - If zero_retention=True => DO NOT store the file anywhere.
+    - If zero_retention=False => store only ONE copy by filename (overwrite).
     """
     start = time.time()
     job_id = str(uuid.uuid4())
@@ -63,112 +122,25 @@ def process_file(
 
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
-    pages: List[PageText] = []
-    classifications = []
-
     if ext == "pdf":
-        ingested = pdf_to_pages(file_bytes)
-        for p in ingested:
-            if p.text_layer:
-                pages.append(
-                    PageText(
-                        page_number=p.page_number,
-                        text=p.text_layer,
-                        words=None,
-                        lines=None,
-                        blocks=None,
-                        tables=None,
-                    )
-                )
-                continue
-
-            prep = preprocess_image(p.image, request_id=request_id, page_number=p.page_number, enable=preprocess)
-            cls = classify_from_signals(
-                blur_var=prep.blur_var,
-                contrast=prep.contrast,
-                edge_density=prep.edge_density,
-            )
-            classifications.append(cls)
-            profile = _profile_for_category(cls.category)
-
-            if enable_layout:
-                res = _ENGINE.ocr(prep.image, with_words=True, profile=profile)
-                words = res.words or []
-                lines = layout_service.words_to_lines(words) if words else None
-                blocks = layout_service.lines_to_blocks(lines) if lines else None
-                tables = layout_service.detect_tables_from_lines(lines) if lines else None
-
-                if tables and words and hasattr(layout_service, "structure_table_from_words"):
-                    structured = []
-                    for t in tables:
-                        try:
-                            structured.append(layout_service.structure_table_from_words(words, t))
-                        except Exception:
-                            structured.append(t)
-                    tables = structured
-
-                pages.append(
-                    PageText(
-                        page_number=p.page_number,
-                        text=res.text,
-                        words=words,
-                        lines=lines,
-                        blocks=blocks,
-                        tables=tables,
-                    )
-                )
-            else:
-                res = _ENGINE.ocr(prep.image, with_words=False, profile=profile)
-                pages.append(PageText(page_number=p.page_number, text=res.text, words=None, lines=None, blocks=None, tables=None))
-
+        pages = extract_from_pdf(file_bytes)
     elif ext in {"jpg", "jpeg", "png", "bmp", "tif", "tiff"}:
-        ingested = image_to_page(file_bytes)
-        p = ingested[0]
-        prep = preprocess_image(p.image, request_id=request_id, page_number=1, enable=preprocess)
-        cls = classify_from_signals(blur_var=prep.blur_var, contrast=prep.contrast, edge_density=prep.edge_density)
-        classifications.append(cls)
-        profile = _profile_for_category(cls.category)
-
-        if enable_layout:
-            res = _ENGINE.ocr(prep.image, with_words=True, profile=profile)
-            words = res.words or []
-            lines = layout_service.words_to_lines(words) if words else None
-            blocks = layout_service.lines_to_blocks(lines) if lines else None
-            tables = layout_service.detect_tables_from_lines(lines) if lines else None
-            pages = [PageText(page_number=1, text=res.text, words=words, lines=lines, blocks=blocks, tables=tables)]
-        else:
-            res = _ENGINE.ocr(prep.image, with_words=False, profile=profile)
-            pages = [PageText(page_number=1, text=res.text, words=None, lines=None, blocks=None, tables=None)]
-
+        pages = extract_from_image(file_bytes)
     elif ext == "docx":
-        pages = _extract_from_docx(file_bytes)
+        pages = extract_from_docx(file_bytes)
     else:
         raise ValueError(f"Unsupported file type: .{ext or 'unknown'}")
-
-    if enable_layout:
-        try:
-            layout_service.tag_headers_footers(pages)
-        except Exception:
-            pass
-        pages = normalize_pages(pages)
 
     full_text = "\n\n".join(p.text for p in pages)
     processing_time_ms = int((time.time() - start) * 1000)
 
+    # ✅ FIX #1: Only store when retention is OFF
     if not zero_retention:
         file_service.save_unique_by_name(filename, file_bytes)
     else:
+        # extra safety: if something old exists with same filename, remove it
+        # (optional, but matches your "no retention" expectation)
         file_service.delete_if_exists(filename)
-
-    if classifications:
-        best = max(classifications, key=lambda c: c.confidence)
-        classification_meta = {
-            "category": best.category,
-            "confidence": float(best.confidence),
-            "signals": best.signals,
-        }
-    else:
-        classification_meta = {"category": "unknown", "confidence": 0.0, "signals": {}}
 
     return OCRResponse(
         job_id=job_id,
@@ -181,13 +153,7 @@ def process_file(
             "file_type": ext,
             "num_pages": len(pages),
             "processing_time_ms": processing_time_ms,
-            "engine": _ENGINE.name,
-            "engine_profile": _profile_for_category(classification_meta["category"]),
+            "engine": "tesseract",
             "zero_retention": bool(zero_retention),
-            "enable_layout": bool(enable_layout),
-            "preprocess": preprocess if preprocess is not None else bool(settings.PREPROCESS_ENABLE),
-            "classification": classification_meta,
-            "request_id": request_id,
-            "pipeline_version": "v1",
         },
     )
