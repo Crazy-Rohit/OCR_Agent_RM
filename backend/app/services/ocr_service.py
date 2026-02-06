@@ -15,8 +15,9 @@ from app.models.schemas import OCRResponse, PageText
 from app.services import file_service
 from app.core.config import settings
 
-# (Optional) if you already have layout_service, keep it. Otherwise remove these 2 lines.
-from app.services.layout_service import build_layout
+from app.services.ocr_phase2_adapter import phase2_enrich_page
+from app.services.semantic_cleanup import cleanup_page
+from app.services.quality_scoring import score_page
 
 
 def configure_tesseract():
@@ -49,11 +50,6 @@ def _preprocess(image: Image.Image) -> Image.Image:
     return image
 
 
-def ocr_image_text_only(image: Image.Image) -> str:
-    image = _preprocess(image)
-    return pytesseract.image_to_string(image).strip()
-
-
 def ocr_image_words(image: Image.Image) -> Dict[str, Any]:
     """OCR with word-level confidence + bbox."""
     image = _preprocess(image)
@@ -67,11 +63,14 @@ def ocr_image_words(image: Image.Image) -> Dict[str, Any]:
         txt = (data["text"][i] or "").strip()
         conf = data["conf"][i]
 
-        if not txt or conf == "-1":
+        # Keep only non-empty tokens; NO confidence-based dropping
+        if not txt:
             continue
 
         try:
-            conf_f = float(conf) / 100.0
+            # Tesseract conf is 0..100; normalize to 0..1; -1 means "no conf"
+            conf_i = float(conf)
+            conf_f = conf_i / 100.0 if conf_i >= 0 else None
         except Exception:
             conf_f = None
 
@@ -93,7 +92,6 @@ def ocr_image_words(image: Image.Image) -> Dict[str, Any]:
 
 
 def extract_from_pdf(file_bytes: bytes) -> List[PageText]:
-    """Hybrid: text-layer PDF first; OCR fallback returns words+confidence."""
     pdf = pdfium.PdfDocument(file_bytes)
     pages: List[PageText] = []
 
@@ -129,7 +127,7 @@ def extract_from_image(file_bytes: bytes) -> List[PageText]:
 def extract_from_docx(file_bytes: bytes) -> List[PageText]:
     doc = Document(io.BytesIO(file_bytes))
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
-    text = "\\n".join(paragraphs)
+    text = "\n".join(paragraphs)
     return [PageText(page_number=1, text=text)]
 
 
@@ -157,7 +155,25 @@ def process_file(
     else:
         raise ValueError(f"Unsupported file type: .{ext or 'unknown'}")
 
-    full_text = "\\n\\n".join(p.text for p in pages)
+    # -------- Phase 2 + Phase 3 (early) --------
+    enriched_pages: List[PageText] = []
+    page_quality: List[Dict[str, Any]] = []
+
+    for p in pages:
+        page_dict = p.model_dump() if hasattr(p, "model_dump") else p.dict()
+
+        # Phase 2: layout reconstruction
+        page_dict = phase2_enrich_page(page_dict)
+
+        # Phase 3 early: semantic cleanup + quality scoring
+        page_dict = cleanup_page(page_dict)
+        page_dict["quality"] = score_page(page_dict.get("words") or [], page_dict.get("text_normalized") or page_dict.get("text") or "")
+
+        page_quality.append({"page": page_dict.get("page_number"), **(page_dict.get("quality") or {})})
+        enriched_pages.append(PageText(**page_dict))
+
+    # Prefer normalized text for full_text if present
+    full_text = "\n\n".join((p.text_normalized or p.text or "") for p in enriched_pages).strip()
     processing_time_ms = int((time.time() - start) * 1000)
 
     if not zero_retention:
@@ -165,22 +181,26 @@ def process_file(
     else:
         file_service.delete_if_exists(filename)
 
+    # Aggregate quality
+    qs = [q.get("quality_score") for q in page_quality if isinstance(q.get("quality_score"), (int, float))]
+    avg_quality = (sum(qs) / len(qs)) if qs else None
+
     return OCRResponse(
         job_id=job_id,
         status="success",
         document_type=document_type,
-        pages=pages,
+        pages=enriched_pages,
         full_text=full_text,
         metadata={
             "file_name": filename,
             "file_type": ext,
-            "num_pages": len(pages),
+            "num_pages": len(enriched_pages),
             "processing_time_ms": processing_time_ms,
             "engine": "tesseract",
             "zero_retention": bool(zero_retention),
+            "phase2_complete": True,
+            "phase3_started": True,
+            "avg_quality_score": avg_quality,
+            "page_quality": page_quality,
         },
     )
-
-
-def process_page(words):
-    return build_layout(words)

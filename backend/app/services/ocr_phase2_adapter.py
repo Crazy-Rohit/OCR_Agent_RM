@@ -1,27 +1,26 @@
-"""
-Copy this adapter into your existing OCR flow.
+from __future__ import annotations
 
-Goal: return page image + bbox layout so frontend can show overlays.
-"""
-from typing import Dict, Any, List
-from PIL import Image
+from typing import Any, Dict
+
 from app.services.layout_service import build_layout
-from app.utils.table_detection import detect_tables
-from app.utils.image_encode import pil_to_data_url
 
-def build_page_response(page_number: int, page_img: Image.Image, words: List[Dict[str, Any]]) -> Dict[str, Any]:
-    layout = build_layout(words)
-    tables = detect_tables(page_img)
 
-    data_url, w, h = pil_to_data_url(page_img)
+def phase2_enrich_page(page: Dict[str, Any]) -> Dict[str, Any]:
+    """Phase 2: layout refinement only (NO dropping)."""
+    words = page.get("words") or []
+    layout = build_layout(words, page_width=page.get("width"), page_height=page.get("height"))
 
-    return {
-        "page_number": page_number,
-        "image_base64": data_url,
-        "width": w,
-        "height": h,
-        "words": words,
-        "lines": layout.get("lines", []),
-        "blocks": layout.get("blocks", []),
-        "tables": tables,
+    out = dict(page)
+    out["lines"] = layout.get("lines", [])
+    out["blocks"] = layout.get("blocks", [])
+    out["tables"] = layout.get("tables", [])
+    out["text"] = layout.get("text") or (out.get("text") or "")
+
+    out["stats"] = {
+        **(out.get("stats") or {}),
+        "phase2_layout": True,
+        "total_words": len(words),
+        "lines": len(out["lines"]),
+        "blocks": len(out["blocks"]),
     }
+    return out

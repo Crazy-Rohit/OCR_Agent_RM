@@ -1,4 +1,5 @@
 import hashlib
+import traceback
 from typing import List, Optional
 
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException
@@ -49,6 +50,7 @@ async def extract_text(
     except HTTPException:
         raise
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 

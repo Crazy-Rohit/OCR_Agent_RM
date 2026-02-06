@@ -48,6 +48,22 @@ export default function OcrPageTextViewer() {
 
   const pageText = useMemo(() => (page ? buildPageText(page) : ""), [page]);
 
+
+  async function readErrorDetail(res) {
+    // Try JSON first (FastAPI typically returns {"detail": "..."}), else fallback to text.
+    try {
+      const data = await res.clone().json();
+      if (data && typeof data.detail === "string") return data.detail;
+      return JSON.stringify(data);
+    } catch {
+      try {
+        return await res.clone().text();
+      } catch {
+        return "";
+      }
+    }
+  }
+
   async function runOcrForAll() {
     if (!files.length) return;
     setLoading(true);
@@ -63,7 +79,12 @@ export default function OcrPageTextViewer() {
         form.append("file", f);
 
         const res = await fetch(OCR_URL, { method: "POST", body: form });
-        if (!res.ok) throw new Error(`${f.name}: OCR failed: ${res.status} ${res.statusText}`);
+
+        if (!res.ok) {
+          const detail = await readErrorDetail(res);
+          const msg = detail ? `${res.status} ${res.statusText} — ${detail}` : `${res.status} ${res.statusText}`;
+          throw new Error(`${f.name}: OCR failed: ${msg}`);
+        }
 
         const json = await res.json();
         out.push({ fileName: f.name, data: json });
