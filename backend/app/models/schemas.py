@@ -3,11 +3,7 @@ from __future__ import annotations
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel, Field
 
-
-class OCRWord(BaseModel):
-    text: str
-    confidence: Optional[float] = None
-    bbox: Optional[List[int]] = None  # [x1,y1,x2,y2]
+from app.models.document_model import DocumentModel
 
 
 class OCRLine(BaseModel):
@@ -20,6 +16,8 @@ class OCRBlock(BaseModel):
     text: str = ""
     bbox: Dict[str, int] = Field(default_factory=dict)
     lines: List[OCRLine] = Field(default_factory=list)
+    table_candidate: bool = False
+    type: Optional[str] = None
 
 
 class PageText(BaseModel):
@@ -31,7 +29,7 @@ class PageText(BaseModel):
     lines: List[OCRLine] = Field(default_factory=list)
     blocks: List[OCRBlock] = Field(default_factory=list)
     tables: List[Dict[str, Any]] = Field(default_factory=list)
-    # Phase 3 early
+    # Phase 3
     text_normalized: str = ""
     quality: Dict[str, Any] = Field(default_factory=dict)
     stats: Dict[str, Any] = Field(default_factory=dict)
@@ -43,7 +41,9 @@ class OCRResponse(BaseModel):
     document_type: str
     pages: List[PageText]
     full_text: str
-    metadata: Dict[str, Any]
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    # Phase 3 normalized output (TOP-LEVEL)
+    document: Optional[DocumentModel] = None
 
 
 class OCRBatchItem(BaseModel):

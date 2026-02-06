@@ -1,252 +1,305 @@
 import React, { useMemo, useState } from "react";
 
-function buildPageText(p) {
-  if (p && typeof p.text === "string" && p.text.trim().length) return p.text;
-  if (p && Array.isArray(p.words) && p.words.length) return p.words.map((w) => w.text).join(" ");
-  return "";
+/**
+ * Drop-in replacement for: frontend/src/components/OcrPageTextViewer.jsx
+ *
+ * What it adds:
+ * - Renders Phase 3 top-level `document`:
+ *    - Markdown view: response.document.markdown
+ *    - Structured Blocks view: response.document.pages[].blocks[]
+ * - Keeps existing views:
+ *    - Page Text (Phase 2/3 text)
+ *    - Raw JSON
+ * - Better error reporting: shows FastAPI {detail:"..."} on non-2xx
+ *
+ * Assumptions:
+ * - Backend endpoint: POST http://127.0.0.1:8000/api/v1/ocr/extract
+ * - Form fields: file, document_type, zero_retention
+ */
+
+const API_URL = "http://127.0.0.1:8000/api/v1/ocr/extract";
+
+function prettyJson(obj) {
+  try {
+    return JSON.stringify(obj, null, 2);
+  } catch {
+    return String(obj);
+  }
 }
 
-function downloadText(filename, content) {
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-function safeBaseName(name) {
-  const n = (name || "file").replace(/\.[^/.]+$/, "");
-  return n.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 80) || "file";
+function safeGet(obj, path, fallback = undefined) {
+  try {
+    return path.split(".").reduce((acc, key) => (acc ? acc[key] : undefined), obj) ?? fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export default function OcrPageTextViewer() {
-  const [files, setFiles] = useState([]); // File[]
-  const [results, setResults] = useState([]); // [{fileName, data}]
-  const [selectedFileIdx, setSelectedFileIdx] = useState(0);
-  const [pageIdx, setPageIdx] = useState(0);
+  const [files, setFiles] = useState([]);
+  const [documentType, setDocumentType] = useState("generic");
+  const [zeroRetention, setZeroRetention] = useState(true);
 
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
+  const [results, setResults] = useState([]); // [{filename, response, error}]
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [activePage, setActivePage] = useState(1);
 
-  // ✅ Your real backend endpoint (single-file)
-  const OCR_URL = "http://127.0.0.1:8000/api/v1/ocr/extract";
+  const [viewMode, setViewMode] = useState("markdown"); // markdown | blocks | page | raw
+  const [running, setRunning] = useState(false);
 
-  const selected = results[selectedFileIdx] || null;
-  const data = selected ? selected.data : null;
-  const pages = (data && data.pages) || [];
-  const page = pages[pageIdx];
+  const active = results[activeIndex]?.response || null;
+  const activeErr = results[activeIndex]?.error || null;
 
-  const fullText = useMemo(() => {
-    if (!data) return "";
-    if (typeof data.full_text === "string" && data.full_text.trim().length) return data.full_text;
-    return pages.map((p) => buildPageText(p)).join("\n\n");
-  }, [data, pages]);
+  const pages = useMemo(() => {
+    const ps = active?.pages || [];
+    return Array.isArray(ps) ? ps : [];
+  }, [active]);
 
-  const pageText = useMemo(() => (page ? buildPageText(page) : ""), [page]);
+  const maxPages = pages.length || 1;
 
+  const docModel = active?.document || null;
+  const docMarkdown = docModel?.markdown || "";
+  const docPages = Array.isArray(docModel?.pages) ? docModel.pages : [];
 
-  async function readErrorDetail(res) {
-    // Try JSON first (FastAPI typically returns {"detail": "..."}), else fallback to text.
-    try {
-      const data = await res.clone().json();
-      if (data && typeof data.detail === "string") return data.detail;
-      return JSON.stringify(data);
-    } catch {
-      try {
-        return await res.clone().text();
-      } catch {
-        return "";
-      }
-    }
-  }
+  const blockView = useMemo(() => {
+    if (!docPages.length) return [];
+    // Find matching page_number, else take first
+    const match = docPages.find((p) => p.page_number === activePage) || docPages[0];
+    return Array.isArray(match?.blocks) ? match.blocks : [];
+  }, [docPages, activePage]);
 
   async function runOcrForAll() {
-    if (!files.length) return;
-    setLoading(true);
-    setError(null);
+    if (!files.length) {
+      setResults([{ filename: "", response: null, error: "No files selected." }]);
+      return;
+    }
+
+    setRunning(true);
     setResults([]);
-    setSelectedFileIdx(0);
-    setPageIdx(0);
+    setActiveIndex(0);
+    setActivePage(1);
 
-    try {
-      const out = [];
-      for (const f of files) {
-        const form = new FormData();
-        form.append("file", f);
+    const next = [];
 
-        const res = await fetch(OCR_URL, { method: "POST", body: form });
+    for (const f of files) {
+      const formData = new FormData();
+      formData.append("file", f);
+      formData.append("document_type", documentType);
+      formData.append("zero_retention", String(zeroRetention));
 
-        if (!res.ok) {
-          const detail = await readErrorDetail(res);
-          const msg = detail ? `${res.status} ${res.statusText} — ${detail}` : `${res.status} ${res.statusText}`;
-          throw new Error(`${f.name}: OCR failed: ${msg}`);
+      try {
+        const res = await fetch(API_URL, { method: "POST", body: formData });
+
+        let body = null;
+        let text = "";
+        const ct = res.headers.get("content-type") || "";
+
+        if (ct.includes("application/json")) {
+          body = await res.json();
+        } else {
+          text = await res.text();
         }
 
-        const json = await res.json();
-        out.push({ fileName: f.name, data: json });
+        if (!res.ok) {
+          const detail =
+            body?.detail ||
+            body?.message ||
+            (typeof body === "string" ? body : "") ||
+            text ||
+            `${res.status} ${res.statusText}`;
+          next.push({ filename: f.name, response: null, error: `OCR failed: ${res.status} ${res.statusText} — ${detail}` });
+        } else {
+          next.push({ filename: f.name, response: body, error: null });
+        }
+      } catch (e) {
+        next.push({ filename: f.name, response: null, error: `OCR failed: ${String(e?.message || e)}` });
       }
-      setResults(out);
-    } catch (e) {
-      setError(e && e.message ? e.message : "Unknown error");
-    } finally {
-      setLoading(false);
     }
+
+    setResults(next);
+    setRunning(false);
+
+    // Default view preference:
+    // If document.markdown exists -> markdown, else page
+    const firstOk = next.find((x) => x.response);
+    if (firstOk?.response?.document?.markdown) setViewMode("markdown");
+    else setViewMode("page");
   }
 
-  function onPickFiles(e) {
-    const picked = Array.from((e.target.files && e.target.files) || []);
-    setFiles(picked);
+  function onFilesChange(e) {
+    const fs = Array.from(e.target.files || []);
+    setFiles(fs);
   }
 
-  function downloadSelectedFullTxt() {
-    if (!selected || !data) return;
-    const base = safeBaseName(selected.fileName);
-    downloadText(`${base}_ocr_output.txt`, fullText);
+  function renderTabs() {
+    const hasDocument = !!active?.document;
+    const hasMarkdown = !!active?.document?.markdown;
+    return (
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
+        <button onClick={() => setViewMode("page")} disabled={!active}>
+          Page Text
+        </button>
+        <button onClick={() => setViewMode("raw")} disabled={!active}>
+          Raw JSON
+        </button>
+        <button onClick={() => setViewMode("markdown")} disabled={!active || !hasMarkdown}>
+          Markdown
+        </button>
+        <button onClick={() => setViewMode("blocks")} disabled={!active || !hasDocument}>
+          Blocks
+        </button>
+      </div>
+    );
   }
 
-  function downloadSelectedPageTxt() {
-    if (!selected || !page) return;
-    const base = safeBaseName(selected.fileName);
-    const pn = (page && page.page_number) || pageIdx + 1;
-    downloadText(`${base}_page_${pn}.txt`, pageText);
+  function renderHeader() {
+    return (
+      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <input type="file" multiple onChange={onFilesChange} />
+        <select value={documentType} onChange={(e) => setDocumentType(e.target.value)}>
+          <option value="generic">generic</option>
+          <option value="invoice">invoice</option>
+          <option value="receipt">receipt</option>
+          <option value="resume">resume</option>
+        </select>
+        <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <input type="checkbox" checked={zeroRetention} onChange={(e) => setZeroRetention(e.target.checked)} />
+          zero_retention
+        </label>
+        <button onClick={runOcrForAll} disabled={running || !files.length}>
+          {running ? "Running..." : "Run OCR"}
+        </button>
+      </div>
+    );
+  }
+
+  function renderResultsList() {
+    if (!results.length) return null;
+    return (
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
+        {results.map((r, idx) => {
+          const ok = !!r.response;
+          return (
+            <button
+              key={`${r.filename}-${idx}`}
+              onClick={() => {
+                setActiveIndex(idx);
+                setActivePage(1);
+              }}
+              style={{
+                border: idx === activeIndex ? "2px solid #444" : "1px solid #bbb",
+                padding: "6px 10px",
+                borderRadius: 8,
+                background: ok ? "#fff" : "#ffecec",
+                cursor: "pointer",
+              }}
+              title={ok ? "Success" : r.error || "Error"}
+            >
+              {r.filename || `file_${idx + 1}`} {ok ? "✅" : "❌"}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+
+  function renderPager() {
+    if (!active) return null;
+    return (
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <span style={{ fontWeight: 600 }}>Page:</span>
+        <button onClick={() => setActivePage((p) => Math.max(1, p - 1))} disabled={activePage <= 1}>
+          Prev
+        </button>
+        <span>
+          {activePage} / {maxPages}
+        </span>
+        <button onClick={() => setActivePage((p) => Math.min(maxPages, p + 1))} disabled={activePage >= maxPages}>
+          Next
+        </button>
+
+        <span style={{ marginLeft: 12, fontWeight: 600 }}>Meta:</span>
+        <span style={{ fontFamily: "monospace", fontSize: 12 }}>
+          phase2_complete={String(active?.metadata?.phase2_complete)} | phase3_complete={String(active?.metadata?.phase3_complete)}
+        </span>
+      </div>
+    );
+  }
+
+  function renderActiveView() {
+    if (activeErr && !active) {
+      return (
+        <div style={{ whiteSpace: "pre-wrap", color: "#b00020", background: "#fff3f3", padding: 12, borderRadius: 8 }}>
+          {activeErr}
+        </div>
+      );
+    }
+
+    if (!active) return <div style={{ opacity: 0.8 }}>Select multiple files (Ctrl/Shift) and click Run OCR.</div>;
+
+    if (viewMode === "raw") {
+      return (
+        <pre style={{ whiteSpace: "pre-wrap", background: "#f6f6f6", padding: 12, borderRadius: 8 }}>
+          {prettyJson(active)}
+        </pre>
+      );
+    }
+
+    if (viewMode === "markdown") {
+      const md = docMarkdown || "";
+      if (!md) return <div style={{ opacity: 0.8 }}>No document.markdown available.</div>;
+      return (
+        <pre style={{ whiteSpace: "pre-wrap", background: "#f6f6f6", padding: 12, borderRadius: 8 }}>
+          {md}
+        </pre>
+      );
+    }
+
+    if (viewMode === "blocks") {
+      if (!docModel) return <div style={{ opacity: 0.8 }}>No document model available.</div>;
+      if (!blockView.length) return <div style={{ opacity: 0.8 }}>No blocks found on this page.</div>;
+
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {blockView.map((b, i) => {
+            const type = b.type || "paragraph";
+            const txt = (b.text_normalized || b.text || "").trim();
+            return (
+              <div key={i} style={{ border: "1px solid #ddd", borderRadius: 10, padding: 10 }}>
+                <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                  <span style={{ fontWeight: 700 }}>{type}</span>
+                  {b.table_candidate ? <span title="Heuristic table candidate">🧮 table_candidate</span> : null}
+                  {b.marker ? <span style={{ fontFamily: "monospace" }}>marker={b.marker}</span> : null}
+                  {typeof b.level === "number" && b.level > 0 ? <span>level={b.level}</span> : null}
+                </div>
+                <div style={{ marginTop: 6, whiteSpace: "pre-wrap" }}>{txt || <i>(empty)</i>}</div>
+              </div>
+            );
+          })}
+        </div>
+      );
+    }
+
+    // viewMode === "page"
+    const page = pages.find((p) => p.page_number === activePage) || pages[0];
+    const txt = (page?.text_normalized || page?.text || "").trim();
+    if (!txt) return <div style={{ opacity: 0.8 }}>No text extracted for this page.</div>;
+
+    return (
+      <pre style={{ whiteSpace: "pre-wrap", background: "#f6f6f6", padding: 12, borderRadius: 8 }}>
+        {txt}
+      </pre>
+    );
   }
 
   return (
-    <div style={{ padding: 16, maxWidth: 1300, margin: "0 auto" }}>
-      <div style={{ fontSize: 26, fontWeight: 800, marginBottom: 14 }}>OCR Result (Multi-file → Page-wise + TXT)</div>
-
-      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
-        <input
-          type="file"
-          multiple
-          accept=".pdf,.png,.jpg,.jpeg,.docx"
-          onChange={onPickFiles}
-        />
-
-        <button
-          onClick={runOcrForAll}
-          disabled={!files.length || loading}
-          style={{
-            padding: "10px 14px",
-            borderRadius: 10,
-            border: "1px solid #ccc",
-            cursor: !files.length || loading ? "not-allowed" : "pointer",
-          }}
-        >
-          {loading ? "Running..." : `Run OCR (${files.length || 0} files)`}
-        </button>
-
-        <button
-          onClick={downloadSelectedFullTxt}
-          disabled={!data}
-          style={{
-            padding: "10px 14px",
-            borderRadius: 10,
-            border: "1px solid #ccc",
-            cursor: !data ? "not-allowed" : "pointer",
-          }}
-        >
-          Download TXT (Selected File)
-        </button>
-
-        <button
-          onClick={downloadSelectedPageTxt}
-          disabled={!page}
-          style={{
-            padding: "10px 14px",
-            borderRadius: 10,
-            border: "1px solid #ccc",
-            cursor: !page ? "not-allowed" : "pointer",
-          }}
-        >
-          Download Page TXT (Selected File)
-        </button>
-      </div>
-
-      {error ? <div style={{ marginBottom: 10, color: "crimson", fontWeight: 600 }}>{error}</div> : null}
-
-      {!results.length ? (
-        <div style={{ color: "#666", marginTop: 10 }}>
-          Select multiple files (Ctrl/Shift) and click Run OCR.
-        </div>
-      ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "300px 260px 1fr", gap: 16, marginTop: 14 }}>
-          {/* Left: File list */}
-          <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 10, height: "70vh", overflow: "auto" }}>
-            <div style={{ fontWeight: 800, marginBottom: 10 }}>Files</div>
-            {results.map((r, i) => (
-              <button
-                key={`${r.fileName}-${i}`}
-                onClick={() => {
-                  setSelectedFileIdx(i);
-                  setPageIdx(0);
-                }}
-                style={{
-                  width: "100%",
-                  textAlign: "left",
-                  padding: "10px 10px",
-                  marginBottom: 8,
-                  borderRadius: 10,
-                  border: "1px solid #ccc",
-                  background: i === selectedFileIdx ? "#f2f2f2" : "white",
-                  cursor: "pointer",
-                }}
-                title={r.fileName}
-              >
-                {r.fileName}
-              </button>
-            ))}
-          </div>
-
-          {/* Middle: Page list */}
-          <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 10, height: "70vh", overflow: "auto" }}>
-            <div style={{ fontWeight: 800, marginBottom: 10 }}>Pages</div>
-            {pages.map((p, i) => (
-              <button
-                key={`${p.page_number || i + 1}-${i}`}
-                onClick={() => setPageIdx(i)}
-                style={{
-                  width: "100%",
-                  textAlign: "left",
-                  padding: "10px 10px",
-                  marginBottom: 8,
-                  borderRadius: 10,
-                  border: "1px solid #ccc",
-                  background: i === pageIdx ? "#f2f2f2" : "white",
-                  cursor: "pointer",
-                }}
-              >
-                Page {p.page_number || i + 1}
-              </button>
-            ))}
-          </div>
-
-          {/* Right: page text + raw json */}
-          <div style={{ display: "grid", gridTemplateRows: "1fr 260px", gap: 12 }}>
-            <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12, height: "calc(70vh - 272px)", overflow: "auto" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-                <div style={{ fontWeight: 800 }}>
-                  Page Text {page ? `(Page ${page.page_number || pageIdx + 1})` : ""}
-                </div>
-              </div>
-              <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-                {pageText || "(No text extracted for this page)"}
-              </pre>
-            </div>
-
-            <div style={{ border: "1px solid #ddd", borderRadius: 12, padding: 12, overflow: "auto" }}>
-              <div style={{ fontWeight: 800, marginBottom: 10 }}>Raw JSON (Selected File)</div>
-              <pre style={{ margin: 0, fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace" }}>
-                {JSON.stringify(data, null, 2)}
-              </pre>
-            </div>
-          </div>
-        </div>
-      )}
+    <div style={{ padding: 16, maxWidth: 1100, margin: "0 auto", fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, Arial" }}>
+      <h2 style={{ marginTop: 0 }}>OCR Viewer</h2>
+      {renderHeader()}
+      {renderResultsList()}
+      {renderTabs()}
+      {renderPager()}
+      {renderActiveView()}
     </div>
   );
 }

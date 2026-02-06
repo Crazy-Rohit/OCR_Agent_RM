@@ -16,8 +16,11 @@ from app.services import file_service
 from app.core.config import settings
 
 from app.services.ocr_phase2_adapter import phase2_enrich_page
-from app.services.semantic_cleanup import cleanup_page
+from app.services.semantic_cleanup import cleanup_page  # Phase 3 early (existing)
 from app.services.quality_scoring import score_page
+
+# Phase 3 proper
+from app.services.document_normalizer import normalize_document
 
 
 def configure_tesseract():
@@ -51,7 +54,7 @@ def _preprocess(image: Image.Image) -> Image.Image:
 
 
 def ocr_image_words(image: Image.Image) -> Dict[str, Any]:
-    """OCR with word-level confidence + bbox."""
+    """OCR with word-level confidence + bbox (NO dropping)."""
     image = _preprocess(image)
     data = pytesseract.image_to_data(image, output_type=Output.DICT)
 
@@ -63,12 +66,10 @@ def ocr_image_words(image: Image.Image) -> Dict[str, Any]:
         txt = (data["text"][i] or "").strip()
         conf = data["conf"][i]
 
-        # Keep only non-empty tokens; NO confidence-based dropping
         if not txt:
             continue
 
         try:
-            # Tesseract conf is 0..100; normalize to 0..1; -1 means "no conf"
             conf_i = float(conf)
             conf_f = conf_i / 100.0 if conf_i >= 0 else None
         except Exception:
@@ -155,7 +156,6 @@ def process_file(
     else:
         raise ValueError(f"Unsupported file type: .{ext or 'unknown'}")
 
-    # -------- Phase 2 + Phase 3 (early) --------
     enriched_pages: List[PageText] = []
     page_quality: List[Dict[str, Any]] = []
 
@@ -165,14 +165,16 @@ def process_file(
         # Phase 2: layout reconstruction
         page_dict = phase2_enrich_page(page_dict)
 
-        # Phase 3 early: semantic cleanup + quality scoring
+        # Phase 3 early: legacy cleanup + quality
         page_dict = cleanup_page(page_dict)
-        page_dict["quality"] = score_page(page_dict.get("words") or [], page_dict.get("text_normalized") or page_dict.get("text") or "")
+        page_dict["quality"] = score_page(
+            page_dict.get("words") or [],
+            page_dict.get("text_normalized") or page_dict.get("text") or "",
+        )
 
         page_quality.append({"page": page_dict.get("page_number"), **(page_dict.get("quality") or {})})
         enriched_pages.append(PageText(**page_dict))
 
-    # Prefer normalized text for full_text if present
     full_text = "\n\n".join((p.text_normalized or p.text or "") for p in enriched_pages).strip()
     processing_time_ms = int((time.time() - start) * 1000)
 
@@ -181,9 +183,14 @@ def process_file(
     else:
         file_service.delete_if_exists(filename)
 
-    # Aggregate quality
     qs = [q.get("quality_score") for q in page_quality if isinstance(q.get("quality_score"), (int, float))]
     avg_quality = (sum(qs) / len(qs)) if qs else None
+
+    # Phase 3 proper: canonical document model (TOP-LEVEL)
+    document_model = normalize_document(
+        [p.model_dump() for p in enriched_pages],
+        full_text=full_text,
+    )
 
     return OCRResponse(
         job_id=job_id,
@@ -191,6 +198,7 @@ def process_file(
         document_type=document_type,
         pages=enriched_pages,
         full_text=full_text,
+        document=document_model,
         metadata={
             "file_name": filename,
             "file_type": ext,
@@ -199,7 +207,7 @@ def process_file(
             "engine": "tesseract",
             "zero_retention": bool(zero_retention),
             "phase2_complete": True,
-            "phase3_started": True,
+            "phase3_complete": True,
             "avg_quality_score": avg_quality,
             "page_quality": page_quality,
         },
