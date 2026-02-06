@@ -2,6 +2,12 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 
 
+class OCRWord(BaseModel):
+    text: str
+    confidence: Optional[float] = None
+    bbox: Optional[List[int]] = None  # [x1,y1,x2,y2]
+
+
 class PageText(BaseModel):
     page_number: int
     text: str
