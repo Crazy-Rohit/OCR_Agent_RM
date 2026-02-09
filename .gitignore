@@ -2,6 +2,7 @@
 backend/venv/
 __pycache__/
 *.pyc
+backend/.venv/
 
 # Node
 frontend/node_modules/
@@ -11,4 +12,3 @@ frontend/dist/
 .DS_Store
 Thumbs.db
 
-backend/.venv/
