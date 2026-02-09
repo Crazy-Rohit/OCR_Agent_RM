@@ -24,23 +24,59 @@ class NormBlock(BaseModel):
     bbox: Dict[str, int] = Field(default_factory=dict)
 
     # Optional structure hints for downstream (no breaking)
-    level: int = 0                 # heading/list nesting level (heuristic)
-    marker: Optional[str] = None   # bullet/number marker if list_item
-    table_candidate: bool = False  # heuristic table region flag
+    level: int = 0
+    marker: Optional[str] = None
+    table_candidate: bool = False
+
+    # Handwriting routing (non-destructive)
+    # printed | handwritten | unknown
+    script: Optional[str] = None
+    handwriting_score: Optional[float] = None
+    handwriting_signals: Dict[str, Any] = Field(default_factory=dict)
 
 
 class NormPage(BaseModel):
     page_number: int
     blocks: List[NormBlock] = Field(default_factory=list)
-    # printed | handwritten | mixed | unknown
-    classification: str = "unknown"
-    # optional diagnostic stats
+    classification: str = "unknown"  # printed | handwritten | mixed | unknown
     routing: Dict[str, Any] = Field(default_factory=dict)
+
+
+class NormTableCell(BaseModel):
+    row: int
+    col: int
+    text: str = ""
+    bbox: Optional[List[int]] = None  # [x1,y1,x2,y2]
+    confidence: Optional[float] = None
+
+
+class NormTable(BaseModel):
+    page_number: int
+    source_block_index: Optional[int] = None
+    bbox: Optional[List[int]] = None  # [x1,y1,x2,y2]
+    n_rows: int = 0
+    n_cols: int = 0
+    cells: List[NormTableCell] = Field(default_factory=list)
+    method: str = "bbox_grid_heuristic"
+    score: Optional[float] = None
+
+
+class NormChunk(BaseModel):
+    chunk_id: str
+    page_number: int
+    block_indices: List[int] = Field(default_factory=list)
+    text: str
 
 
 class DocumentModel(BaseModel):
     pages: List[NormPage] = Field(default_factory=list)
+    tables: List[NormTable] = Field(default_factory=list)
+    chunks: List[NormChunk] = Field(default_factory=list)
+
     full_text: str = ""
     full_text_normalized: str = ""
     markdown: str = ""
+    html: str = ""
+
+    diagnostics: Dict[str, Any] = Field(default_factory=dict)
     metadata: Dict[str, Any] = Field(default_factory=dict)

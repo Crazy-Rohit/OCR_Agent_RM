@@ -44,7 +44,7 @@ export default function OcrPageTextViewer() {
   const [activeIndex, setActiveIndex] = useState(0);
   const [activePage, setActivePage] = useState(1);
 
-  const [viewMode, setViewMode] = useState("markdown"); // markdown | blocks | page | raw
+  const [viewMode, setViewMode] = useState("markdown"); // markdown | blocks | tables | page | raw
   const [running, setRunning] = useState(false);
 
   const active = results[activeIndex]?.response || null;
@@ -60,6 +60,7 @@ export default function OcrPageTextViewer() {
   const docModel = active?.document || null;
   const docMarkdown = docModel?.markdown || "";
   const docPages = Array.isArray(docModel?.pages) ? docModel.pages : [];
+  const docTables = Array.isArray(docModel?.tables) ? docModel.tables : [];
 
   const blockView = useMemo(() => {
     if (!docPages.length) return [];
@@ -134,6 +135,7 @@ export default function OcrPageTextViewer() {
   function renderTabs() {
     const hasDocument = !!active?.document;
     const hasMarkdown = !!active?.document?.markdown;
+    const hasTables = Array.isArray(active?.document?.tables) && active.document.tables.length > 0;
     return (
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
         <button onClick={() => setViewMode("page")} disabled={!active}>
@@ -148,6 +150,69 @@ export default function OcrPageTextViewer() {
         <button onClick={() => setViewMode("blocks")} disabled={!active || !hasDocument}>
           Blocks
         </button>
+        <button onClick={() => setViewMode("tables")} disabled={!active || !hasTables}>
+          Tables
+        </button>
+      </div>
+    );
+  }
+
+  function renderTableGrid(table) {
+    const nRows = Number(table?.n_rows || 0);
+    const nCols = Number(table?.n_cols || 0);
+    const cells = Array.isArray(table?.cells) ? table.cells : [];
+    if (!nRows || !nCols) return <div>Invalid table.</div>;
+
+    const grid = Array.from({ length: nRows }, () => Array.from({ length: nCols }, () => ""));
+    for (const c of cells) {
+      const r = Number(c?.row || 0);
+      const k = Number(c?.col || 0);
+      if (r >= 0 && r < nRows && k >= 0 && k < nCols) {
+        grid[r][k] = String(c?.text || "");
+      }
+    }
+
+    return (
+      <div style={{ overflowX: "auto", border: "1px solid #ddd", borderRadius: 8 }}>
+        <table style={{ borderCollapse: "collapse", width: "100%" }}>
+          <tbody>
+            {grid.map((row, ri) => (
+              <tr key={ri}>
+                {row.map((val, ci) => (
+                  <td key={ci} style={{ border: "1px solid #ddd", padding: 6, verticalAlign: "top" }}>
+                    {val}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  }
+
+  function renderTables() {
+    if (!active) return null;
+    if (!docTables.length) return <div>No tables extracted.</div>;
+
+    const pageTables = docTables.filter((t) => Number(t?.page_number) === Number(activePage));
+    if (!pageTables.length) {
+      return <div>No tables extracted on this page.</div>;
+    }
+
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+        {pageTables.map((t, idx) => (
+          <div key={`${t.page_number}-${t.source_block_index ?? idx}`} style={{ border: "1px solid #eee", borderRadius: 10, padding: 10 }}>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ fontWeight: 700 }}>Table {idx + 1}</div>
+              <div style={{ opacity: 0.8 }}>rows: {t.n_rows} cols: {t.n_cols}</div>
+              {typeof t.score === "number" ? <div style={{ opacity: 0.8 }}>score: {t.score.toFixed(2)}</div> : null}
+              <div style={{ opacity: 0.8 }}>method: {t.method || "heuristic"}</div>
+            </div>
+            {renderTableGrid(t)}
+          </div>
+        ))}
       </div>
     );
   }
@@ -255,6 +320,11 @@ export default function OcrPageTextViewer() {
       );
     }
 
+    if (viewMode === "tables") {
+      if (!docModel) return <div style={{ opacity: 0.8 }}>No document model available.</div>;
+      return renderTables();
+    }
+
     if (viewMode === "blocks") {
       if (!docModel) return <div style={{ opacity: 0.8 }}>No document model available.</div>;
       if (!blockView.length) return <div style={{ opacity: 0.8 }}>No blocks found on this page.</div>;
@@ -269,6 +339,10 @@ export default function OcrPageTextViewer() {
                 <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                   <span style={{ fontWeight: 700 }}>{type}</span>
                   {b.table_candidate ? <span title="Heuristic table candidate">🧮 table_candidate</span> : null}
+                  {b.script === "handwritten" ? (
+                    <span title={`Handwriting score: ${typeof b.handwriting_score === "number" ? b.handwriting_score.toFixed(2) : "n/a"}`}>✍️ handwritten</span>
+                  ) : null}
+                  {b.script === "printed" ? <span title="Likely printed">🖨️ printed</span> : null}
                   {b.marker ? <span style={{ fontFamily: "monospace" }}>marker={b.marker}</span> : null}
                   {typeof b.level === "number" && b.level > 0 ? <span>level={b.level}</span> : null}
                 </div>
@@ -303,3 +377,5 @@ export default function OcrPageTextViewer() {
     </div>
   );
 }
+
+

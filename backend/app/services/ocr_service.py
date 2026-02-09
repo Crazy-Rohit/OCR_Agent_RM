@@ -3,7 +3,7 @@ import os
 import platform
 import time
 import uuid
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple, Optional
 
 import pytesseract
 import pypdfium2 as pdfium
@@ -22,6 +22,28 @@ from app.services.quality_scoring import score_page
 # Phase 3 proper
 from app.services.document_normalizer import normalize_document
 
+# Phase 4: optional multi-engine orchestration (docTR/TrOCR)
+try:
+    from app.services.engine_orchestrator import orchestrate_page_ocr
+except Exception:
+    orchestrate_page_ocr = None  # type: ignore
+
+# Phase 4 exports regeneration (optional; depends on your repo files)
+try:
+    from app.services.export_markdown import document_to_markdown
+except Exception:
+    document_to_markdown = None  # type: ignore
+
+try:
+    from app.services.export_html import document_to_html
+except Exception:
+    document_to_html = None  # type: ignore
+
+try:
+    from app.services.chunking import chunk_document
+except Exception:
+    chunk_document = None  # type: ignore
+
 
 def configure_tesseract():
     env_cmd = os.getenv("TESSERACT_CMD")
@@ -30,7 +52,7 @@ def configure_tesseract():
         return
 
     if platform.system().lower().startswith("win"):
-        win_default = r"C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
+        win_default = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
         if os.path.exists(win_default):
             pytesseract.pytesseract.tesseract_cmd = win_default
             return
@@ -92,9 +114,15 @@ def ocr_image_words(image: Image.Image) -> Dict[str, Any]:
     return {"text": " ".join(texts).strip(), "words": words}
 
 
-def extract_from_pdf(file_bytes: bytes) -> List[PageText]:
+def extract_from_pdf(file_bytes: bytes) -> Tuple[List[PageText], List[Optional[Image.Image]]]:
+    """
+    Returns:
+      pages: List[PageText]
+      page_images: aligned list (PIL image for image-rendered pages; None for text-extracted pages)
+    """
     pdf = pdfium.PdfDocument(file_bytes)
     pages: List[PageText] = []
+    page_images: List[Optional[Image.Image]] = []
 
     for i in range(len(pdf)):
         page = pdf[i]
@@ -108,28 +136,30 @@ def extract_from_pdf(file_bytes: bytes) -> List[PageText]:
 
         if text:
             pages.append(PageText(page_number=i + 1, text=text))
+            page_images.append(None)
         else:
             scale = 300 / 72.0
             bitmap = page.render(scale=scale)
-            pil_image = bitmap.to_pil()
+            pil_image = bitmap.to_pil().convert("RGB")
 
             o = ocr_image_words(pil_image)
             pages.append(PageText(page_number=i + 1, text=o["text"], words=o["words"]))
+            page_images.append(pil_image)
 
-    return pages
+    return pages, page_images
 
 
-def extract_from_image(file_bytes: bytes) -> List[PageText]:
-    image = Image.open(io.BytesIO(file_bytes))
+def extract_from_image(file_bytes: bytes) -> Tuple[List[PageText], List[Optional[Image.Image]]]:
+    image = Image.open(io.BytesIO(file_bytes)).convert("RGB")
     o = ocr_image_words(image)
-    return [PageText(page_number=1, text=o["text"], words=o["words"])]
+    return [PageText(page_number=1, text=o["text"], words=o["words"])], [image]
 
 
-def extract_from_docx(file_bytes: bytes) -> List[PageText]:
+def extract_from_docx(file_bytes: bytes) -> Tuple[List[PageText], List[Optional[Image.Image]]]:
     doc = Document(io.BytesIO(file_bytes))
     paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
     text = "\n".join(paragraphs)
-    return [PageText(page_number=1, text=text)]
+    return [PageText(page_number=1, text=text)], [None]
 
 
 def process_file(
@@ -147,18 +177,20 @@ def process_file(
 
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
+    # --- Phase 1: ingestion (plus keep images for multi-engine) ---
     if ext == "pdf":
-        pages = extract_from_pdf(file_bytes)
+        pages, page_images = extract_from_pdf(file_bytes)
     elif ext in {"jpg", "jpeg", "png", "bmp", "tif", "tiff"}:
-        pages = extract_from_image(file_bytes)
+        pages, page_images = extract_from_image(file_bytes)
     elif ext == "docx":
-        pages = extract_from_docx(file_bytes)
+        pages, page_images = extract_from_docx(file_bytes)
     else:
         raise ValueError(f"Unsupported file type: .{ext or 'unknown'}")
 
     enriched_pages: List[PageText] = []
     page_quality: List[Dict[str, Any]] = []
 
+    # --- Phase 2 + Phase 3 early (non-destructive) ---
     for p in pages:
         page_dict = p.model_dump() if hasattr(p, "model_dump") else p.dict()
 
@@ -186,11 +218,60 @@ def process_file(
     qs = [q.get("quality_score") for q in page_quality if isinstance(q.get("quality_score"), (int, float))]
     avg_quality = (sum(qs) / len(qs)) if qs else None
 
-    # Phase 3 proper: canonical document model (TOP-LEVEL)
+    # --- Phase 3 proper: canonical document model (TOP-LEVEL) ---
     document_model = normalize_document(
         [p.model_dump() for p in enriched_pages],
         full_text=full_text,
     )
+
+    # --- Phase 4: docTR + TrOCR orchestration (OPTIONAL, safe) ---
+    # Runs only if (a) orchestrator exists and (b) we have page images
+    if orchestrate_page_ocr is not None and isinstance(page_images, list) and document_model is not None:
+        try:
+            dm = document_model.model_dump() if hasattr(document_model, "model_dump") else dict(document_model)
+            dm_pages = dm.get("pages") or []
+            updated_pages = []
+            for i, pg in enumerate(dm_pages):
+                img = page_images[i] if i < len(page_images) else None
+                if img is None:
+                    updated_pages.append(pg)
+                    continue
+                page_number = int(pg.get("page_number") or (i + 1))
+                updated_pages.append(
+                    orchestrate_page_ocr(
+                        page_image=img,
+                        page_number=page_number,
+                        base_page_dict=pg,
+                    )
+                )
+            dm["pages"] = updated_pages
+
+            # Rebuild full_text_normalized from blocks after overrides
+            parts: List[str] = []
+            for pg in dm["pages"]:
+                for b in (pg.get("blocks") or []):
+                    t = (b.get("text_normalized") or b.get("text") or "").strip()
+                    if t:
+                        parts.append(t)
+            dm["full_text_normalized"] = "\n\n".join(parts).strip()
+
+            # Regenerate exports if helpers exist
+            if document_to_markdown is not None:
+                dm["markdown"] = document_to_markdown(dm["pages"], tables=dm.get("tables") or [])
+            if document_to_html is not None:
+                dm["html"] = document_to_html(dm["pages"], tables=dm.get("tables") or [])
+            if chunk_document is not None:
+                dm["chunks"] = chunk_document(dm["pages"])
+
+            # Try to reconstruct strongly-typed model
+            try:
+                from app.models.document_model import DocumentModel  # type: ignore
+                document_model = DocumentModel(**dm)
+            except Exception:
+                document_model = dm  # type: ignore
+        except Exception:
+            # orchestration must never fail the request
+            pass
 
     return OCRResponse(
         job_id=job_id,
@@ -204,7 +285,7 @@ def process_file(
             "file_type": ext,
             "num_pages": len(enriched_pages),
             "processing_time_ms": processing_time_ms,
-            "engine": "tesseract",
+            "engine": "tesseract(+doctr/trocr)",
             "zero_retention": bool(zero_retention),
             "phase2_complete": True,
             "phase3_complete": True,

@@ -3,11 +3,26 @@ from __future__ import annotations
 from typing import Any, Dict, List
 import re
 
-from app.models.document_model import DocumentModel, NormPage, NormBlock, NormLine, NormWord
+from app.models.document_model import (
+    DocumentModel,
+    NormPage,
+    NormBlock,
+    NormLine,
+    NormWord,
+    NormTable,
+    NormTableCell,
+)
 from app.services.semantic_cleanup_v2 import normalize_text, split_list_marker
 from app.services.routing import classify_page
+from app.services.handwriting_detection import detect_handwriting_block, aggregate_page_script
 from app.services.table_candidates import mark_table_candidates
+try:
+    from app.services.table_extraction import extract_tables_from_blocks
+except Exception:  # pragma: no cover
+    extract_tables_from_blocks = None  # type: ignore
 from app.services.export_markdown import document_to_markdown
+from app.services.export_html import document_to_html
+from app.services.chunking import chunk_document
 
 
 def _is_heading(text: str, avg_line_len: float, is_top_block: bool) -> bool:
@@ -21,6 +36,7 @@ def _is_heading(text: str, avg_line_len: float, is_top_block: bool) -> bool:
 
 def normalize_document(pages: List[Dict[str, Any]], *, full_text: str) -> DocumentModel:
     norm_pages: List[NormPage] = []
+    norm_tables: List[NormTable] = []
 
     for p in pages:
         page_words = p.get("words") or []
@@ -40,6 +56,7 @@ def normalize_document(pages: List[Dict[str, Any]], *, full_text: str) -> Docume
         avg_line_len = (sum(line_lens) / len(line_lens)) if line_lens else 60.0
 
         blocks: List[NormBlock] = []
+        block_scripts: List[str] = []
         for bi, b in enumerate(raw_blocks):
             block_text = (b.get("text") or "").strip()
             block_text_norm = normalize_text(block_text)
@@ -80,6 +97,13 @@ def normalize_document(pages: List[Dict[str, Any]], *, full_text: str) -> Docume
                 combined = "\n".join([first_rest] + rest_lines).strip()
                 block_text_norm = combined
 
+            # Phase 4.2: handwriting detection (block-level, non-destructive)
+            script, hw_score, hw_signals = detect_handwriting_block({
+                "lines": [ln.model_dump() for ln in lines],
+                "bbox": b.get("bbox") or {},
+            })
+            block_scripts.append(script)
+
             blocks.append(
                 NormBlock(
                     type=btype,
@@ -90,8 +114,47 @@ def normalize_document(pages: List[Dict[str, Any]], *, full_text: str) -> Docume
                     level=level,
                     marker=marker,
                     table_candidate=bool(b.get("table_candidate")),
+                    script=script,
+                    handwriting_score=hw_score,
+                    handwriting_signals=hw_signals,
                 )
             )
+
+        # Phase 4.1: true table extraction (non-destructive)
+        if extract_tables_from_blocks is not None:
+            extracted = extract_tables_from_blocks([blk.model_dump() for blk in blocks])
+        else:
+            extracted = []
+        for t in extracted:
+            cells = [
+                NormTableCell(
+                    row=int(c.get("row") or 0),
+                    col=int(c.get("col") or 0),
+                    text=(c.get("text") or ""),
+                    bbox=c.get("bbox"),
+                    confidence=c.get("confidence"),
+                )
+                for c in (t.get("cells") or [])
+            ]
+            norm_tables.append(
+                NormTable(
+                    page_number=p.get("page_number"),
+                    source_block_index=t.get("source_block_index"),
+                    bbox=t.get("bbox"),
+                    n_rows=int(t.get("n_rows") or 0),
+                    n_cols=int(t.get("n_cols") or 0),
+                    cells=cells,
+                    method=t.get("method") or "bbox_grid_heuristic",
+                    score=t.get("score"),
+                )
+            )
+
+        # Phase 4.2: page-level script aggregation (safe override when strong)
+        page_script, page_script_stats = aggregate_page_script(block_scripts)
+        # Keep the original classify_page result unless handwriting strongly indicates otherwise.
+        if page_script in {"handwritten", "mixed"}:
+            classification = page_script
+        routing_stats = {**(routing_stats or {}), **{"page_script": page_script, **page_script_stats}}
 
         norm_pages.append(
             NormPage(
@@ -103,12 +166,15 @@ def normalize_document(pages: List[Dict[str, Any]], *, full_text: str) -> Docume
         )
 
     full_text_norm = normalize_text(full_text)
-    md = document_to_markdown([pg.model_dump() for pg in norm_pages])
+    md = document_to_markdown([pg.model_dump() for pg in norm_pages], tables=[t.model_dump() for t in norm_tables])
 
     return DocumentModel(
         pages=norm_pages,
+        tables=norm_tables,
         full_text=full_text,
         full_text_normalized=full_text_norm,
         markdown=md,
         metadata={"num_pages": len(norm_pages)},
     )
+
+# NOTE: Phase 4 fast-pack integration (tables + html + chunks)
