@@ -119,6 +119,7 @@ def extract_tables_from_blocks(
     page_number: int = 0,
     *,
     enable: bool = True,
+    allow_soft_fallback: bool = False,
     min_rows: int = 2,
     min_cols: int = 2,
     max_cols: int = 12,
@@ -143,12 +144,16 @@ def extract_tables_from_blocks(
 
     tables: List[Dict[str, Any]] = []
 
-    # If candidates are missing, we still try to extract from blocks that
-    # look like borderless UI tables (alignment-based).
+    # IMPORTANT (production safety): By default we extract ONLY from explicit
+    # table candidates/regions. The "soft fallback" path is a major source of
+    # false positives (paragraphs detected as tables). Enable it only for
+    # offline debugging.
     for bi, b in enumerate(blocks):
         btype = (b.get("type") or "").lower()
         is_candidate = bool(b.get("table_candidate")) or btype == "table_region"
         if not is_candidate:
+            if not allow_soft_fallback:
+                continue
             # soft fallback: attempt extraction from paragraph/unknown blocks with enough lines
             if btype not in {"paragraph", "unknown"}:
                 continue

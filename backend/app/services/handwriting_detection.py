@@ -51,8 +51,39 @@ def detect_handwriting_block(block: Dict[str, Any]) -> Tuple[str, float, Dict[st
                 words.append(w)
 
     n_words = len(words)
+    if n_words == 0:
+        # Cursive/noisy handwriting often yields no tokens from Tesseract.
+        # Do NOT hard-fail to 0; provide a weak signal so orchestrator can try TrOCR fallback.
+        return "unknown", 0.25, {"reason": "no_words", "word_count": 0, "trocr_fallback_hint": True}
+
     if n_words < 5:
-        return "unknown", 0.0, {"reason": "too_few_words", "word_count": n_words}
+        confs = []
+        for w in words:
+            nc = _norm_conf(w.get("confidence"))
+            if nc is not None:
+                confs.append(nc)
+        avg_conf = (sum(confs) / len(confs)) if confs else None
+
+        toks = [(w.get("text") or "").strip() for w in words]
+        short_ratio = sum(1 for t in toks if len(t) <= 2) / n_words
+
+        score = 0.0
+        if avg_conf is not None:
+            if avg_conf <= 0.45:
+                score += 0.45
+            elif avg_conf <= 0.55:
+                score += 0.25
+        if short_ratio >= 0.60:
+            score += 0.25
+
+        score = max(0.15, min(0.65, score))
+        return "unknown", score, {
+            "reason": "few_words",
+            "word_count": n_words,
+            "avg_conf": avg_conf,
+            "short_token_ratio": short_ratio,
+            "trocr_fallback_hint": True,
+        }
 
     # confidences
     confs = []

@@ -5,6 +5,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image
 
+import cv2
+import numpy as np
+
 # Local engines are optional. If missing deps, we fall back safely.
 try:
     from app.services.doctr_engine import doctr_ocr_page
@@ -54,6 +57,30 @@ def _overlap(a: Tuple[int,int,int,int], b: Tuple[int,int,int,int]) -> float:
     inter=(ix2-ix1)*(iy2-iy1)
     area_a=(ax2-ax1)*(ay2-ay1) + 1e-6
     return float(inter/area_a)
+
+def _page_word_count(blocks: List[Dict[str, Any]]) -> int:
+    n = 0
+    for b in (blocks or []):
+        for ln in (b.get("lines") or []):
+            for w in (ln.get("words") or []):
+                if isinstance(w, dict) and (w.get("text") or "").strip():
+                    n += 1
+    return n
+
+
+def _ink_density(img: Image.Image) -> float:
+    """Return fraction of 'ink' pixels in a downscaled grayscale image."""
+    try:
+        g = img.convert("L")
+        # Downscale to speed up and stabilize thresholds
+        g = g.resize((min(800, g.size[0]), int(min(800, g.size[0]) * g.size[1] / g.size[0])), Image.BILINEAR)
+        a = np.array(g, dtype=np.uint8)
+        # Otsu to separate ink/background
+        _, th = cv2.threshold(a, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        ink = (th == 0).sum()
+        return float(ink) / float(th.size) if th.size else 0.0
+    except Exception:
+        return 0.0
 
 
 def orchestrate_page_ocr(
@@ -180,45 +207,73 @@ def orchestrate_page_ocr(
 
     page["engine_usage"]["trocr"] = bool(trocr_used)
 
-    # 3) Checkbox detection (attach markers)
-    if enable_checkbox_detection and detect_checkboxes is not None and attach_checkboxes_to_blocks is not None:
+# 2b) TrOCR full-page fallback (for cursive/freehand pages where Tesseract produced few/no words)
+    if enable_trocr and trocr_ocr_crops is not None and not trocr_used:
         try:
-            cbs = detect_checkboxes(page_image)
-            if cbs:
-                blocks = attach_checkboxes_to_blocks(blocks, cbs)
-                page.setdefault("routing", {})
-                page["routing"]["checkboxes_detected"] = len(cbs)
-                page["engine_usage"]["checkbox_detection"] = True
-            else:
-                page["engine_usage"]["checkbox_detection"] = False
+            wc = _page_word_count(blocks)
+            ink = _ink_density(page_image)
+            # If page has ink but almost no readable tokens, run TrOCR on full page.
+            if wc < 6 and ink >= 0.015:
+                w, h = page_image.size
+                txts = trocr_ocr_crops(page_image, [(0, 0, w, h)])
+                txt = (txts[0] if txts else "").strip()
+                if txt:
+                    blocks.append({
+                        "type": "paragraph",
+                        "text": txt,
+                        "text_normalized": txt,
+                        "bbox": {"x1": 0, "y1": 0, "x2": int(w), "y2": int(h)},
+                        "script": "handwritten",
+                        "engine": "trocr",
+                        "table_candidate": False,
+                    })
+                    trocr_used = True
+                    page["engine_usage"]["trocr"] = True
+                    page.setdefault("routing", {})
+                    page["routing"]["trocr_full_page_fallback"] = {"word_count": wc, "ink_density": ink}
         except Exception:
-            page["engine_usage"]["checkbox_detection"] = False
-    else:
-        page["engine_usage"]["checkbox_detection"] = False
+            pass
 
-    # 4) docTR: layout heavy pages (or table-candidate pages)
-    # IMPORTANT: boxed-field forms can look like tables. docTR runs only if there are REAL table candidates.
-    if enable_doctr and doctr_ocr_page is not None:
-        if doctr_only_if_table_candidate:
-            has_candidate = any(
-                (bool(b.get("table_candidate")) or (b.get("type") == "table_region"))
-                and not bool(b.get("form_box_region"))
-                for b in blocks
-            )
+
+        # 3) Checkbox detection (attach markers)
+        if enable_checkbox_detection and detect_checkboxes is not None and attach_checkboxes_to_blocks is not None:
+            try:
+                cbs = detect_checkboxes(page_image)
+                if cbs:
+                    blocks = attach_checkboxes_to_blocks(blocks, cbs)
+                    page.setdefault("routing", {})
+                    page["routing"]["checkboxes_detected"] = len(cbs)
+                    page["engine_usage"]["checkbox_detection"] = True
+                else:
+                    page["engine_usage"]["checkbox_detection"] = False
+            except Exception:
+                page["engine_usage"]["checkbox_detection"] = False
         else:
-            has_candidate = True
+            page["engine_usage"]["checkbox_detection"] = False
 
-        if has_candidate and page_number <= max_doctr_pages:
-            doctr_out = doctr_ocr_page(page_image)
-            if doctr_out and doctr_out.get("text"):
-                page["engine_usage"]["doctr"] = True
-                page["doctr"] = doctr_out
+        # 4) docTR: layout heavy pages (or table-candidate pages)
+        # IMPORTANT: boxed-field forms can look like tables. docTR runs only if there are REAL table candidates.
+        if enable_doctr and doctr_ocr_page is not None:
+            if doctr_only_if_table_candidate:
+                has_candidate = any(
+                    (bool(b.get("table_candidate")) or (b.get("type") == "table_region"))
+                    and not bool(b.get("form_box_region"))
+                    for b in blocks
+                )
+            else:
+                has_candidate = True
+
+            if has_candidate and page_number <= max_doctr_pages:
+                doctr_out = doctr_ocr_page(page_image)
+                if doctr_out and doctr_out.get("text"):
+                    page["engine_usage"]["doctr"] = True
+                    page["doctr"] = doctr_out
+                else:
+                    page["engine_usage"]["doctr"] = False
             else:
                 page["engine_usage"]["doctr"] = False
         else:
             page["engine_usage"]["doctr"] = False
-    else:
-        page["engine_usage"]["doctr"] = False
 
-    page["blocks"] = blocks
-    return page
+        page["blocks"] = blocks
+        return page
