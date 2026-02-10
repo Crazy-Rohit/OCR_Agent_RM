@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -7,150 +8,137 @@ import cv2
 from PIL import Image
 
 
-def detect_checkboxes(
-    page_image: Image.Image,
-    *,
-    min_size_px: int = 10,
-    max_size_px: int = 120,
-) -> List[Dict[str, Any]]:
+@dataclass
+class Checkbox:
+    bbox: Tuple[int,int,int,int]
+    checked: bool
+    score: float  # ink ratio inside
+
+
+def _pil_to_gray(img: Image.Image) -> np.ndarray:
+    arr = np.array(img.convert("L"))
+    return arr
+
+
+def detect_checkboxes(page_image: Image.Image) -> List[Checkbox]:
     """
-    Detect checkbox-like square boxes on a page image.
-    Returns list of {bbox:[x1,y1,x2,y2], state:"checked"|"unchecked", score:float}.
-    Best-effort heuristic (works well for forms).
+    Detect small square checkboxes and whether they are checked.
+    Works best on scanned forms (not UI screenshots).
     """
-    # Convert to grayscale numpy
-    img = np.array(page_image.convert("L"))
-    h, w = img.shape[:2]
+    gray = _pil_to_gray(page_image)
+    # binarize
+    bin_inv = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
+                                   cv2.THRESH_BINARY_INV, 35, 10)
 
-    # Adaptive threshold to handle uneven lighting
-    # Use odd blockSize; tune for typical scanned forms
-    block = int(max(31, (min(h, w) // 40) | 1))
-    thr = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                cv2.THRESH_BINARY_INV, block, 7)
+    # find contours
+    cnts, _ = cv2.findContours(bin_inv, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    h, w = gray.shape[:2]
+    out: List[Checkbox] = []
 
-    # Mild morph to connect box borders
-    k = max(1, min(h, w) // 500)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (k, k))
-    thr = cv2.morphologyEx(thr, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-    contours, _ = cv2.findContours(thr, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    boxes: List[Dict[str, Any]] = []
-    for cnt in contours:
-        x, y, bw, bh = cv2.boundingRect(cnt)
-        if bw < min_size_px or bh < min_size_px or bw > max_size_px or bh > max_size_px:
+    for c in cnts:
+        x,y,bw,bh = cv2.boundingRect(c)
+        if bw < 10 or bh < 10:
+            continue
+        if bw*bh > 0.02*w*h:
+            continue
+        ar = bw/float(bh)
+        if ar < 0.7 or ar > 1.3:
+            continue
+        area = bw*bh
+        if area < 120 or area > 4000:
             continue
 
-        # Must be roughly square
-        ar = bw / float(bh + 1e-6)
-        if ar < 0.75 or ar > 1.33:
+        # square-ish
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.06*peri, True)
+        if len(approx) < 4:
             continue
 
-        area = bw * bh
-        # Relative area sanity
-        if area < 80 or area > (max_size_px * max_size_px):
+        # compute ink inside (checked mark) by masking border
+        pad = max(1, int(min(bw,bh)*0.2))
+        x1 = x+pad; y1=y+pad; x2=x+bw-pad; y2=y+bh-pad
+        if x2<=x1 or y2<=y1:
             continue
+        inner = bin_inv[y1:y2, x1:x2]
+        ink = float(np.count_nonzero(inner)) / float(inner.size + 1e-6)
+        checked = ink > 0.08  # threshold tuned for common ticks
+        out.append(Checkbox(bbox=(x,y,x+bw,y+bh), checked=checked, score=ink))
 
-        peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.03 * peri, True)
-        if len(approx) < 4 or len(approx) > 8:
-            continue
-
-        # Border thickness estimate: if box is just a filled square, skip
-        # Compute edge pixel ratio inside bbox border band
-        crop = thr[y:y+bh, x:x+bw]
-        if crop.size == 0:
-            continue
-
-        # Inner region (exclude border)
-        pad = max(2, int(min(bw, bh) * 0.2))
-        inner = crop[pad:bh-pad, pad:bw-pad]
-        if inner.size == 0:
-            continue
-
-        # Determine checkedness: how much ink inside inner area
-        ink_ratio = float(np.count_nonzero(inner)) / float(inner.size)
-        state = "checked" if ink_ratio >= 0.06 else "unchecked"
-
-        boxes.append({
-            "bbox": [int(x), int(y), int(x + bw), int(y + bh)],
-            "state": state,
-            "score": round(ink_ratio, 4),
-        })
-
-    # Sort top-to-bottom, left-to-right
-    boxes.sort(key=lambda b: (b["bbox"][1], b["bbox"][0]))
-    return boxes
+    # de-dup very overlapping boxes
+    out_sorted = sorted(out, key=lambda cb: (cb.bbox[1], cb.bbox[0]))
+    merged: List[Checkbox] = []
+    for cb in out_sorted:
+        if not merged:
+            merged.append(cb); continue
+        x1,y1,x2,y2 = cb.bbox
+        mx1,my1,mx2,my2 = merged[-1].bbox
+        if abs(x1-mx1)<3 and abs(y1-my1)<3 and abs(x2-mx2)<3 and abs(y2-my2)<3:
+            # keep the higher score
+            if cb.score > merged[-1].score:
+                merged[-1] = cb
+        else:
+            merged.append(cb)
+    return merged
 
 
-def attach_checkboxes_to_blocks(
-    page_dict: Dict[str, Any],
-    checkboxes: List[Dict[str, Any]],
-    *,
-    x_gap_px: int = 140,
-    y_iou_min: float = 0.12,
-) -> Dict[str, Any]:
+def attach_checkboxes_to_blocks(blocks: List[Dict[str, Any]], checkboxes: List[Checkbox]) -> List[Dict[str, Any]]:
     """
-    Attach checkbox markers to nearest blocks (list item conversion).
+    Attach checkbox markers to nearest text block on the same line (to the right).
     Adds:
-      page_dict["annotations"]["checkboxes"]
-      block["checkbox"] = {state, bbox, score}
-      block["type"]="list_item" and block["marker"]="[x]" or "[ ]" when matched.
+      - block['checkbox'] = {'checked': bool, 'bbox':[...], 'score': float}
+      - block['type'] becomes 'list_item' if it was paragraph
+      - block['marker'] becomes '[x]' or '[ ]' (downstream markdown renders task list)
     """
-    blocks = page_dict.get("blocks") or []
-    ann = page_dict.get("annotations") or {}
-    ann["checkboxes"] = checkboxes
-    page_dict["annotations"] = ann
+    if not blocks or not checkboxes:
+        return blocks
 
-    def block_bbox(b: Dict[str, Any]) -> Optional[Tuple[int,int,int,int]]:
-        bb = b.get("bbox") or {}
+    def bbox_of_block(b: Dict[str,Any]) -> Optional[Tuple[int,int,int,int]]:
+        bb=b.get("bbox")
         if isinstance(bb, dict):
-            x1 = bb.get("x1"); y1 = bb.get("y1"); x2 = bb.get("x2"); y2 = bb.get("y2")
-            if all(v is not None for v in (x1,y1,x2,y2)):
-                return int(x1), int(y1), int(x2), int(y2)
-        if isinstance(bb, list) and len(bb) == 4:
-            return int(bb[0]), int(bb[1]), int(bb[2]), int(bb[3])
+            x1=int(bb.get("x1",0)); y1=int(bb.get("y1",0)); x2=int(bb.get("x2",0)); y2=int(bb.get("y2",0))
+            return (x1,y1,x2,y2)
+        if isinstance(bb, (list,tuple)) and len(bb)==4:
+            return tuple(int(v) for v in bb)  # type: ignore
         return None
 
-    def y_iou(a: Tuple[int,int,int,int], b: Tuple[int,int,int,int]) -> float:
-        ay1, ay2 = a[1], a[3]
-        by1, by2 = b[1], b[3]
-        inter = max(0, min(ay2, by2) - max(ay1, by1))
-        union = max(1, (ay2-ay1) + (by2-by1) - inter)
-        return inter / union
+    out=[]
+    for b in blocks:
+        out.append(dict(b))
 
     for cb in checkboxes:
-        cbx1, cby1, cbx2, cby2 = cb["bbox"]
-        cb_box = (cbx1, cby1, cbx2, cby2)
-        best_i = None
-        best_score = 0.0
+        cx1,cy1,cx2,cy2 = cb.bbox
+        ccy = (cy1+cy2)//2
 
-        for i, b in enumerate(blocks):
-            bb = block_bbox(b)
-            if not bb:
+        best_i=None
+        best_dist=1e18
+        for i,b in enumerate(out):
+            bb=bbox_of_block(b)
+            if bb is None:
                 continue
-            # checkbox should be left of text block
-            if bb[0] < cbx2:
+            x1,y1,x2,y2=bb
+            by=(y1+y2)//2
+            # same line-ish
+            if abs(by-ccy) > max(12, (y2-y1)//2):
                 continue
-            gap = bb[0] - cbx2
-            if gap > x_gap_px:
+            # checkbox should be left of text
+            if cx2 > x2:
                 continue
-            yi = y_iou(bb, cb_box)
-            if yi < y_iou_min:
-                continue
-            score = yi * (1.0 - min(gap / max(1, x_gap_px), 1.0))
-            if score > best_score:
-                best_score = score
-                best_i = i
+            if cx2 <= x1:
+                dx = x1 - cx2
+            else:
+                dx = 0
+            dy = abs(by-ccy)
+            dist = dx*dx + dy*dy
+            if dist < best_dist:
+                best_dist=dist
+                best_i=i
 
-        if best_i is not None:
-            b = blocks[best_i]
-            marker = "[x]" if cb["state"] == "checked" else "[ ]"
-            b["checkbox"] = {"state": cb["state"], "bbox": cb["bbox"], "score": cb.get("score")}
-            # Convert to list item if not already
-            if b.get("type") not in {"heading", "table_region"}:
+        if best_i is not None and best_dist < (3000*3000):
+            b = out[best_i]
+            b["checkbox"] = {"checked": bool(cb.checked), "bbox": [cx1,cy1,cx2,cy2], "score": float(cb.score)}
+            if b.get("type") in (None, "", "paragraph", "unknown"):
                 b["type"] = "list_item"
-                b["marker"] = marker
+            b["marker"] = "[x]" if cb.checked else "[ ]"
+            out[best_i] = b
 
-    page_dict["blocks"] = blocks
-    return page_dict
+    return out

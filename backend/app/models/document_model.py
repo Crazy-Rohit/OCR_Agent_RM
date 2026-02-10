@@ -26,10 +26,13 @@ class NormBlock(BaseModel):
     # Optional structure hints for downstream (no breaking)
     level: int = 0
     marker: Optional[str] = None
+    checkbox: Optional[Dict[str, Any]] = None
     table_candidate: bool = False
 
-    # Checkbox/tick marker attachment (optional)
-    checkbox: Optional[Dict[str, Any]] = None
+    # Engine provenance (optional)
+    engine: Optional[str] = None
+    text_engine: Optional[str] = None
+    form_box_region: bool = False
 
     # Handwriting routing (non-destructive)
     # printed | handwritten | unknown
@@ -38,12 +41,20 @@ class NormBlock(BaseModel):
     handwriting_signals: Dict[str, Any] = Field(default_factory=dict)
 
 
+
+class FormField(BaseModel):
+    key: str
+    value: str
+    method: str = "unknown"  # box_ocr | trocr | tesseract | manual
+    bbox: Optional[List[int]] = None
+    confidence: Optional[float] = None
+
+
 class NormPage(BaseModel):
     page_number: int
     blocks: List[NormBlock] = Field(default_factory=list)
     classification: str = "unknown"  # printed | handwritten | mixed | unknown
     routing: Dict[str, Any] = Field(default_factory=dict)
-    annotations: Dict[str, Any] = Field(default_factory=dict)
 
 
 class NormTableCell(BaseModel):

@@ -43,9 +43,13 @@ try:
     from app.services.chunking import chunk_document
 except Exception:
     chunk_document = None  # type: ignore
+# Diagnostics v2 (noise/skew/mixed-script)
+try:
+    from app.services.diagnostics_v2 import compute_page_diagnostics
+except Exception:
+    compute_page_diagnostics = None  # type: ignore
 
 
-from app.services.diagnostics_v2 import compute_document_diagnostics_v2
 
 def configure_tesseract():
     env_cmd = os.getenv("TESSERACT_CMD")
@@ -226,6 +230,30 @@ def process_file(
         full_text=full_text,
     )
 
+    # --- Diagnostics v2 (non-destructive) ---
+    if compute_page_diagnostics is not None and isinstance(page_images, list) and document_model is not None:
+        try:
+            v2_pages = []
+            for i, img in enumerate(page_images):
+                if img is None:
+                    continue
+                page_num = i + 1
+                # derive page text from enriched_pages if available
+                page_text = ""
+                try:
+                    page_text = enriched_pages[i].text if i < len(enriched_pages) else ""
+                except Exception:
+                    page_text = ""
+                v2_pages.append({"page_number": page_num, **compute_page_diagnostics(img, page_text)})
+            # attach
+            try:
+                document_model.diagnostics.setdefault("v2", {})
+                document_model.diagnostics["v2"]["pages"] = v2_pages
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     # --- Phase 4: docTR + TrOCR orchestration (OPTIONAL, safe) ---
     # Runs only if (a) orchestrator exists and (b) we have page images
     if orchestrate_page_ocr is not None and isinstance(page_images, list) and document_model is not None:
@@ -274,33 +302,6 @@ def process_file(
         except Exception:
             # orchestration must never fail the request
             pass
-
-
-    # --- Phase 4: diagnostics v2 deep (noise/skew/mixed-script) ---
-    try:
-        dm_dict = document_model.model_dump() if hasattr(document_model, "model_dump") else dict(document_model or {})
-        page_texts: List[str] = []
-        for pg in (dm_dict.get("pages") or []):
-            parts: List[str] = []
-            for b in (pg.get("blocks") or []):
-                t = (b.get("text_normalized") or b.get("text") or "").strip()
-                if t:
-                    parts.append(t)
-            page_texts.append("\n".join(parts).strip())
-        diag_v2 = compute_document_diagnostics_v2(page_images=page_images, page_texts=page_texts)
-        # attach to document.diagnostics (non-breaking)
-        if isinstance(dm_dict.get("diagnostics"), dict):
-            dm_dict["diagnostics"]["v2"] = diag_v2
-        else:
-            dm_dict["diagnostics"] = {"v2": diag_v2}
-        # rehydrate typed model if possible
-        try:
-            from app.models.document_model import DocumentModel  # type: ignore
-            document_model = DocumentModel(**dm_dict)  # type: ignore
-        except Exception:
-            document_model = dm_dict  # type: ignore
-    except Exception:
-        pass
 
     return OCRResponse(
         job_id=job_id,

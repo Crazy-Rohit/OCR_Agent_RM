@@ -23,6 +23,7 @@ except Exception:  # pragma: no cover
 from app.services.export_markdown import document_to_markdown
 from app.services.export_html import document_to_html
 from app.services.chunking import chunk_document
+from app.models.document_model import FormField
 
 
 def _is_heading(text: str, avg_line_len: float, is_top_block: bool) -> bool:
@@ -37,6 +38,8 @@ def _is_heading(text: str, avg_line_len: float, is_top_block: bool) -> bool:
 def normalize_document(pages: List[Dict[str, Any]], *, full_text: str) -> DocumentModel:
     norm_pages: List[NormPage] = []
     norm_tables: List[NormTable] = []
+    norm_form_fields: List[FormField] = []
+
 
     for p in pages:
         page_words = p.get("words") or []
@@ -114,10 +117,13 @@ def normalize_document(pages: List[Dict[str, Any]], *, full_text: str) -> Docume
                     level=level,
                     marker=marker,
                     table_candidate=bool(b.get("table_candidate")),
+                    engine=b.get("engine"),
+                    text_engine=b.get("text_engine"),
+                    form_box_region=bool(b.get("form_box_region")),
+                    checkbox=b.get("checkbox"),
                     script=script,
                     handwriting_score=hw_score,
                     handwriting_signals=hw_signals,
-                    checkbox=b.get("checkbox"),
                 )
             )
 
@@ -163,20 +169,78 @@ def normalize_document(pages: List[Dict[str, Any]], *, full_text: str) -> Docume
                 blocks=blocks,
                 classification=classification,
                 routing=routing_stats,
-                annotations=p.get("annotations") or {},
             )
         )
 
+    
+    # Phase 4.X: best-effort form field binding (labels -> boxed/freehand values)
+    # We bind only for blocks that are marked as form_box_region (box OCR output).
+    # This is non-destructive and safe: if no labels found, we just skip.
+    for pg in norm_pages:
+        # collect candidate labels (printed blocks)
+        labels = []
+        for bi, blk in enumerate(pg.blocks):
+            if (blk.script or "").lower() == "handwritten":
+                continue
+            t = (blk.text_normalized or blk.text or "").strip()
+            if not t:
+                continue
+            # label-ish patterns common in forms
+            if t.endswith(":") or any(k in t.lower() for k in ["policy", "name", "address", "city", "id no", "certificate", "phone", "date"]):
+                bb = blk.bbox or {}
+                x1 = int(bb.get("x1", 0)); y1 = int(bb.get("y1", 0)); x2 = int(bb.get("x2", 0)); y2 = int(bb.get("y2", 0))
+                labels.append((bi, t.rstrip(" :"), (x1,y1,x2,y2)))
+
+        for blk in pg.blocks:
+            if not blk.form_box_region:
+                continue
+            val = (blk.text_normalized or blk.text or "").strip()
+            if not val:
+                continue
+            bb = blk.bbox or {}
+            vx1 = int(bb.get("x1", 0)); vy1 = int(bb.get("y1", 0)); vx2 = int(bb.get("x2", 0)); vy2 = int(bb.get("y2", 0))
+            vcy = (vy1+vy2)//2
+
+            best = None
+            best_score = 1e18
+            for _, key, (lx1,ly1,lx2,ly2) in labels:
+                lcy = (ly1+ly2)//2
+                # same line-ish
+                if abs(lcy - vcy) > max(18, (vy2-vy1)//2):
+                    continue
+                # label should be left of value
+                if lx2 > vx1:
+                    continue
+                dx = vx1 - lx2
+                dy = abs(lcy - vcy)
+                score = dx*dx + dy*dy
+                if score < best_score:
+                    best_score = score
+                    best = key
+
+            if best and best_score < (2500*2500):
+                norm_form_fields.append(FormField(key=best,
+                    value=val,
+                    method=(blk.engine or "box_ocr"),
+                    bbox=[vx1,vy1,vx2,vy2],
+                    confidence=None,
+                ))
+
     full_text_norm = normalize_text(full_text)
-    md = document_to_markdown([pg.model_dump() for pg in norm_pages], tables=[t.model_dump() for t in norm_tables])
+    md = document_to_markdown(
+        [pg.model_dump() for pg in norm_pages],
+        tables=[t.model_dump() for t in norm_tables]
+    )
 
     return DocumentModel(
         pages=norm_pages,
         tables=norm_tables,
+        form_fields=norm_form_fields,
         full_text=full_text,
         full_text_normalized=full_text_norm,
         markdown=md,
         metadata={"num_pages": len(norm_pages)},
     )
+
 
 # NOTE: Phase 4 fast-pack integration (tables + html + chunks)
