@@ -46,12 +46,14 @@ async def extract_text(
         return process_file(contents, file.filename or "document", document_type, zero_retention=zr)
 
     except ValueError as ve:
-        raise HTTPException(status_code=400, detail=str(ve))
+        raise HTTPException(status_code=400, detail={"error": "bad_request", "message": str(ve)})
+    except TimeoutError as te:
+        raise HTTPException(status_code=408, detail={"error": "timeout", "message": str(te)})
     except HTTPException:
         raise
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail={"error": "internal", "message": str(e)})
 
 
 @router.post("/extract-batch", response_model=OCRBatchResponse)
@@ -139,7 +141,9 @@ async def extract_batch(
             )
 
         except ValueError as ve:
-            results.append(OCRBatchItem(filename=filename, file_hash="", error=str(ve)))
+            results.append(OCRBatchItem(filename=filename, file_hash="", error=f"bad_request: {ve}"))
+        except TimeoutError as te:
+            results.append(OCRBatchItem(filename=filename, file_hash="", error=f"timeout: {te}"))
         except Exception as e:
             results.append(OCRBatchItem(filename=filename, file_hash="", error=str(e)))
 

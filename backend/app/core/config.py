@@ -29,6 +29,23 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = Field(default="uploads")
     MAX_FILE_SIZE_MB: int = Field(default=20, ge=1)
 
+    # Document safety limits (backend hardening)
+    # NOTE: these are enforced BEFORE heavy OCR to avoid resource exhaustion.
+    MAX_PAGES_PER_DOC: int = Field(default=50, ge=1)
+    MAX_IMAGE_MEGAPIXELS: float = Field(default=20.0, ge=1.0)
+
+    # Global OCR time budget (seconds). 0 disables.
+    OCR_GLOBAL_TIMEOUT_S: int = Field(default=120, ge=0)
+
+    # Optional engine orchestration settings
+    ENABLE_DOCTR: bool = Field(default=False)
+    ENABLE_TROCR: bool = Field(default=False)
+    ENGINE_TIMEOUT_DOCTR_S: int = Field(default=25, ge=1)
+    ENGINE_TIMEOUT_TROCR_S: int = Field(default=25, ge=1)
+    ORCH_MAX_TROCR_REGIONS: int = Field(default=12, ge=1)
+    ORCH_MAX_DOCTR_PAGES: int = Field(default=6, ge=0)
+    DOCTR_ONLY_IF_TABLE_CANDIDATE: bool = Field(default=True)
+
     # Batch limits
     MAX_DOCS_PER_BATCH: int = Field(default=10, ge=1)
 

@@ -45,6 +45,8 @@ except Exception:
     chunk_document = None  # type: ignore
 
 
+from app.services.diagnostics_v2 import compute_document_diagnostics_v2
+
 def configure_tesseract():
     env_cmd = os.getenv("TESSERACT_CMD")
     if env_cmd and os.path.exists(env_cmd):
@@ -272,6 +274,33 @@ def process_file(
         except Exception:
             # orchestration must never fail the request
             pass
+
+
+    # --- Phase 4: diagnostics v2 deep (noise/skew/mixed-script) ---
+    try:
+        dm_dict = document_model.model_dump() if hasattr(document_model, "model_dump") else dict(document_model or {})
+        page_texts: List[str] = []
+        for pg in (dm_dict.get("pages") or []):
+            parts: List[str] = []
+            for b in (pg.get("blocks") or []):
+                t = (b.get("text_normalized") or b.get("text") or "").strip()
+                if t:
+                    parts.append(t)
+            page_texts.append("\n".join(parts).strip())
+        diag_v2 = compute_document_diagnostics_v2(page_images=page_images, page_texts=page_texts)
+        # attach to document.diagnostics (non-breaking)
+        if isinstance(dm_dict.get("diagnostics"), dict):
+            dm_dict["diagnostics"]["v2"] = diag_v2
+        else:
+            dm_dict["diagnostics"] = {"v2": diag_v2}
+        # rehydrate typed model if possible
+        try:
+            from app.models.document_model import DocumentModel  # type: ignore
+            document_model = DocumentModel(**dm_dict)  # type: ignore
+        except Exception:
+            document_model = dm_dict  # type: ignore
+    except Exception:
+        pass
 
     return OCRResponse(
         job_id=job_id,

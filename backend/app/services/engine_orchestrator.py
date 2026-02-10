@@ -16,6 +16,13 @@ try:
 except Exception:
     trocr_ocr_crops = None  # type: ignore
 
+# Checkbox / tick detection (optional)
+try:
+    from app.services.checkbox_detection import detect_checkboxes, attach_checkboxes_to_blocks
+except Exception:
+    detect_checkboxes = None  # type: ignore
+    attach_checkboxes_to_blocks = None  # type: ignore
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     v = os.getenv(name)
@@ -34,6 +41,7 @@ def orchestrate_page_ocr(
     max_trocr_regions: int = 12,
     max_doctr_pages: int = 6,
     doctr_only_if_table_candidate: bool = True,
+    enable_checkbox_detection: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Non-destructive orchestration:
@@ -47,6 +55,8 @@ def orchestrate_page_ocr(
         enable_doctr = _env_bool("ENABLE_DOCTR", False)
     if enable_trocr is None:
         enable_trocr = _env_bool("ENABLE_TROCR", False)
+    if enable_checkbox_detection is None:
+        enable_checkbox_detection = _env_bool("ENABLE_CHECKBOX_DETECTION", True)
 
     page = dict(base_page_dict)
     page.setdefault("engine_usage", {})
@@ -108,5 +118,19 @@ def orchestrate_page_ocr(
             page["engine_usage"]["doctr"] = False
     else:
         page["engine_usage"]["doctr"] = False
+
+
+    # 3) Checkbox / tick / bullet detection (forms & task lists). Non-destructive.
+    if enable_checkbox_detection and detect_checkboxes is not None and attach_checkboxes_to_blocks is not None:
+        try:
+            cbs = detect_checkboxes(page_image)
+            if cbs:
+                page = attach_checkboxes_to_blocks(page, cbs)
+                page.setdefault("engine_usage", {})
+                page["engine_usage"].setdefault("checkbox_detection", True)
+        except Exception as e:
+            page.setdefault("engine_usage", {})
+            page["engine_usage"].setdefault("checkbox_detection", False)
+            page.setdefault("orchestration_warnings", []).append({"stage": "checkbox_detection", "error": str(e)})
 
     return page

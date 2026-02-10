@@ -12,20 +12,45 @@ def _table_to_html(table: Dict[str, Any]) -> str:
     n_rows = int(table.get("n_rows") or 0)
     n_cols = int(table.get("n_cols") or 0)
     cells = table.get("cells") or []
-    grid = [["" for _ in range(n_cols)] for _ in range(n_rows)]
+    header_rows = set(int(r) for r in (table.get("header_rows") or []))
+
+    # Build a cell map for span-aware rendering
+    cell_map: Dict[tuple[int, int], Dict[str, Any]] = {}
     for c in cells:
         r = int(c.get("row") or 0)
         k = int(c.get("col") or 0)
         if 0 <= r < n_rows and 0 <= k < n_cols:
-            grid[r][k] = (c.get("text") or "").strip()
+            cell_map[(r, k)] = c
+
+    # mark covered cells due to spans
+    covered = [[False for _ in range(n_cols)] for _ in range(n_rows)]
+    for (r, k), c in cell_map.items():
+        rs = max(1, int(c.get("rowspan") or 1))
+        cs = max(1, int(c.get("colspan") or 1))
+        for rr in range(r, min(n_rows, r + rs)):
+            for cc in range(k, min(n_cols, k + cs)):
+                if (rr, cc) != (r, k):
+                    covered[rr][cc] = True
 
     out: List[str] = []
     out.append("<table>")
     for r in range(n_rows):
         out.append("<tr>")
-        tag = "th" if r == 0 else "td"
         for k in range(n_cols):
-            out.append(f"<{tag}>{_esc(grid[r][k])}</{tag}>")
+            if covered[r][k]:
+                continue
+            c = cell_map.get((r, k))
+            text = (c.get("text") or "").strip() if c else ""
+            rs = max(1, int(c.get("rowspan") or 1)) if c else 1
+            cs = max(1, int(c.get("colspan") or 1)) if c else 1
+            is_header = bool((r in header_rows) or (c and c.get("is_header") is True))
+            tag = "th" if is_header else "td"
+            attrs = ""
+            if rs > 1:
+                attrs += f" rowspan='{rs}'"
+            if cs > 1:
+                attrs += f" colspan='{cs}'"
+            out.append(f"<{tag}{attrs}>{_esc(text)}</{tag}>")
         out.append("</tr>")
     out.append("</table>")
     return "".join(out)

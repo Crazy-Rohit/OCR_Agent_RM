@@ -87,8 +87,15 @@ def document_to_markdown(
                 level = min(max(level, 1), 3)
                 md_parts.append("#" * level + " " + txt)
             elif btype == "list_item":
-                marker = b.get("marker") or "-"
-                if marker.endswith(".") and marker[:-1].isdigit():
+                marker = (b.get("marker") or "-").strip()
+                # Checkbox list support
+                if marker in {"[x]", "[X]", "[ ]", "☐", "☑", "☒"}:
+                    # normalize unicode boxes to markdown task-list
+                    if marker in {"☑", "☒", "[x]", "[X]"}:
+                        md_parts.append(f"- [x] {txt}")
+                    else:
+                        md_parts.append(f"- [ ] {txt}")
+                elif marker.endswith(".") and marker[:-1].isdigit():
                     md_parts.append(f"{marker} {txt}")
                 else:
                     md_parts.append(f"- {txt}")

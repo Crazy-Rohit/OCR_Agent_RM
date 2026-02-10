@@ -9,7 +9,7 @@ _SPACE_BEFORE_PUNCT = re.compile(r"\s+([,.;:!?])")
 _TRAILING_SPACES = re.compile(r"[ \t]+\n")
 _MULTI_BLANK = re.compile(r"\n{3,}")
 
-_LIST_MARKER = re.compile(r"^\s*(?P<marker>(?:[-•*])|(?:\d+\.)|(?:\([a-zA-Z0-9]+\))|(?:[a-zA-Z]\)))\s+")
+_LIST_MARKER = re.compile(r"^\s*(?P<marker>(?:\[\s*[xX ]\s*\])|(?:[☐☑☒])|(?:[-•*])|(?:\d+\.)|(?:\([a-zA-Z0-9]+\))|(?:[a-zA-Z]\)))\s+")
 
 
 def split_list_marker(text: str) -> Tuple[Optional[str], str]:

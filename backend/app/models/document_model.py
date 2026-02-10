@@ -28,6 +28,9 @@ class NormBlock(BaseModel):
     marker: Optional[str] = None
     table_candidate: bool = False
 
+    # Checkbox/tick marker attachment (optional)
+    checkbox: Optional[Dict[str, Any]] = None
+
     # Handwriting routing (non-destructive)
     # printed | handwritten | unknown
     script: Optional[str] = None
@@ -40,6 +43,7 @@ class NormPage(BaseModel):
     blocks: List[NormBlock] = Field(default_factory=list)
     classification: str = "unknown"  # printed | handwritten | mixed | unknown
     routing: Dict[str, Any] = Field(default_factory=dict)
+    annotations: Dict[str, Any] = Field(default_factory=dict)
 
 
 class NormTableCell(BaseModel):

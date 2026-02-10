@@ -117,6 +117,7 @@ def normalize_document(pages: List[Dict[str, Any]], *, full_text: str) -> Docume
                     script=script,
                     handwriting_score=hw_score,
                     handwriting_signals=hw_signals,
+                    checkbox=b.get("checkbox"),
                 )
             )
 
@@ -162,6 +163,7 @@ def normalize_document(pages: List[Dict[str, Any]], *, full_text: str) -> Docume
                 blocks=blocks,
                 classification=classification,
                 routing=routing_stats,
+                annotations=p.get("annotations") or {},
             )
         )
 

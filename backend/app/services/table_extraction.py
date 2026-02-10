@@ -75,7 +75,12 @@ def _cols_from_words(words: List[_Word]) -> Tuple[List[float], float]:
     x_centers = [(w.x1 + w.x2) / 2.0 for w in words]
     widths = [max(1.0, (w.x2 - w.x1)) for w in words]
     med_w = max(10.0, _median(widths))
-    tol = med_w * 0.8
+    # For UI/CSS tables, column gaps can be larger than word widths.
+    # Use a blended tolerance that also scales with overall block width.
+    block_x1 = min(w.x1 for w in words)
+    block_x2 = max(w.x2 for w in words)
+    bw = max(200.0, float(block_x2 - block_x1))
+    tol = max(med_w * 0.8, bw * 0.02)
     clusters = _cluster_1d(x_centers, tol)
     col_centers = [sum(c) / len(c) for c in clusters]
     return col_centers, tol
@@ -138,11 +143,15 @@ def extract_tables_from_blocks(
 
     tables: List[Dict[str, Any]] = []
 
+    # If candidates are missing, we still try to extract from blocks that
+    # look like borderless UI tables (alignment-based).
     for bi, b in enumerate(blocks):
         btype = (b.get("type") or "").lower()
         is_candidate = bool(b.get("table_candidate")) or btype == "table_region"
         if not is_candidate:
-            continue
+            # soft fallback: attempt extraction from paragraph/unknown blocks with enough lines
+            if btype not in {"paragraph", "unknown"}:
+                continue
 
         words = _iter_words_from_block(b)
         if len(words) < 6:
@@ -168,6 +177,17 @@ def extract_tables_from_blocks(
         if n_rows < min_rows or n_cols < min_cols:
             continue
 
+        # Extra sanity: ensure we have a reasonable number of lines (rows)
+        # and that columns are not created from random scattered text.
+        # For UI tables: columns should have support across multiple rows.
+        col_support = [0] * n_cols
+        for w in words:
+            xc = (w.x1 + w.x2) / 2.0
+            col_support[_nearest_index(col_centers, xc)] += 1
+        strong_cols = sum(1 for s in col_support if s >= max(3, int(n_rows * 0.8)))
+        if strong_cols < min_cols:
+            continue
+
         # map (r,c) -> list of words
         grid: Dict[Tuple[int, int], List[_Word]] = {}
         for w in words:
@@ -177,29 +197,96 @@ def extract_tables_from_blocks(
             c = _nearest_index(col_centers, xc)
             grid.setdefault((r, c), []).append(w)
 
+        # Header detection (best-effort)
+        header_rows: List[int] = []
+        if n_rows >= 2:
+            # Heuristic: first row more alpha-heavy, shorter tokens, fewer digits
+            row0_words = [w for (r, _c), ws in grid.items() if r == 0 for w in ws]
+            row1_words = [w for (r, _c), ws in grid.items() if r == 1 for w in ws]
+
+            def row_stats(ws: List[_Word]) -> Tuple[int, int, float]:
+                alpha = 0
+                digit = 0
+                lens: List[int] = []
+                for ww in ws:
+                    t = ww.text
+                    alpha += sum(ch.isalpha() for ch in t)
+                    digit += sum(ch.isdigit() for ch in t)
+                    if t:
+                        lens.append(len(t))
+                avg_len = (sum(lens) / len(lens)) if lens else 0.0
+                return alpha, digit, avg_len
+
+            a0, d0, l0 = row_stats(row0_words)
+            a1, d1, l1 = row_stats(row1_words)
+            if a0 > d0 and (d0 <= d1) and (l0 <= max(22.0, l1)):
+                header_rows = [0]
+
+        # Build a dense grid for span inference
+        rowcol_text = [["" for _ in range(n_cols)] for _ in range(n_rows)]
+        rowcol_words: List[List[List[_Word]]] = [[[] for _ in range(n_cols)] for _ in range(n_rows)]
+        for (r, c), ws in grid.items():
+            if 0 <= r < n_rows and 0 <= c < n_cols:
+                ws_sorted = sorted(ws, key=lambda w: (w.x1, w.y1))
+                rowcol_words[r][c] = ws_sorted
+                rowcol_text[r][c] = " ".join(w.text for w in ws_sorted).strip()
+
         cells: List[Dict[str, Any]] = []
         filled = 0
         all_word_boxes: List[Tuple[int, int, int, int]] = []
-        for (r, c), ws in grid.items():
-            ws_sorted = sorted(ws, key=lambda w: (w.x1, w.y1))
-            text = " ".join(w.text for w in ws_sorted).strip()
-            if not text:
-                continue
-            filled += 1
-            bboxes = [(w.x1, w.y1, w.x2, w.y2) for w in ws_sorted]
-            all_word_boxes.extend(bboxes)
-            bbox = _bbox_union(bboxes)
-            confs = [w.conf for w in ws_sorted if w.conf is not None and not math.isnan(w.conf)]
-            conf = round(sum(confs) / len(confs), 4) if confs else None
-            cells.append(
-                {
-                    "row": int(r),
-                    "col": int(c),
-                    "text": text,
-                    "bbox": bbox,
-                    "confidence": conf,
-                }
-            )
+
+        # Span inference (best-effort):
+        # - colspan: if a cell has text and next columns are empty within same row, treat as colspan
+        # - rowspan: if a cell has text and below rows are empty within same column, treat as rowspan
+        visited = [[False for _ in range(n_cols)] for _ in range(n_rows)]
+
+        for r in range(n_rows):
+            for c in range(n_cols):
+                if visited[r][c]:
+                    continue
+                text = rowcol_text[r][c].strip()
+                if not text:
+                    continue
+
+                # compute colspan
+                colspan = 1
+                cc = c + 1
+                while cc < n_cols and not rowcol_text[r][cc].strip():
+                    colspan += 1
+                    cc += 1
+
+                # compute rowspan
+                rowspan = 1
+                rr = r + 1
+                while rr < n_rows and not rowcol_text[rr][c].strip():
+                    rowspan += 1
+                    rr += 1
+
+                # mark visited
+                for rr2 in range(r, min(n_rows, r + rowspan)):
+                    for cc2 in range(c, min(n_cols, c + colspan)):
+                        visited[rr2][cc2] = True
+
+                ws_sorted = rowcol_words[r][c]
+                bboxes = [(w.x1, w.y1, w.x2, w.y2) for w in ws_sorted]
+                all_word_boxes.extend(bboxes)
+                bbox = _bbox_union(bboxes)
+                confs = [w.conf for w in ws_sorted if w.conf is not None and not math.isnan(w.conf)]
+                conf = round(sum(confs) / len(confs), 4) if confs else None
+
+                filled += 1
+                cells.append(
+                    {
+                        "row": int(r),
+                        "col": int(c),
+                        "text": text,
+                        "bbox": bbox,
+                        "confidence": conf,
+                        "rowspan": int(rowspan),
+                        "colspan": int(colspan),
+                        "is_header": bool(r in header_rows),
+                    }
+                )
 
         if filled < (min_rows * min_cols) - 1:
             # too sparse to be a real table
@@ -216,6 +303,7 @@ def extract_tables_from_blocks(
                 "n_rows": int(n_rows),
                 "n_cols": int(n_cols),
                 "cells": cells,
+                "header_rows": header_rows,
                 "method": "bbox_grid_heuristic_v1",
                 "score": score,
             }
