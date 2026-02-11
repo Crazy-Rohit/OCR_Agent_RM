@@ -25,8 +25,9 @@ from app.services.document_normalizer import normalize_document
 # Phase 4: optional multi-engine orchestration (docTR/TrOCR)
 try:
     from app.services.engine_orchestrator import orchestrate_page_ocr
-except Exception:
+except Exception as e:
     orchestrate_page_ocr = None  # type: ignore
+    ORCHESTRATOR_IMPORT_ERROR = str(e)
 
 # Phase 4 exports regeneration (optional; depends on your repo files)
 try:
@@ -302,6 +303,14 @@ def process_file(
         except Exception:
             # orchestration must never fail the request
             pass
+
+    
+    # expose orchestrator import error (if any)
+    try:
+        if ORCHESTRATOR_IMPORT_ERROR and hasattr(document_model, "diagnostics"):
+            document_model.diagnostics["orchestrator_import_error"] = ORCHESTRATOR_IMPORT_ERROR
+    except Exception:
+        pass
 
     return OCRResponse(
         job_id=job_id,

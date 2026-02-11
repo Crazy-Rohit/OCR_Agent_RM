@@ -1,15 +1,35 @@
 # backend/app/core/config.py
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _resolve_env_files() -> List[str]:
+    """
+    Make .env loading deterministic regardless of where uvicorn is launched from.
+
+    Priority:
+      1) Repo root .env (../..../.env)
+      2) backend/.env
+      3) CWD .env (kept for backwards compatibility)
+    """
+    here = Path(__file__).resolve()
+    repo_root = here.parents[3]  # backend/app/core/config.py -> repo root
+    backend_dir = repo_root / "backend"
+    candidates = [
+        repo_root / ".env",
+        backend_dir / ".env",
+        Path.cwd() / ".env",
+    ]
+    return [str(p) for p in candidates if p.exists()]
+
+
 class Settings(BaseSettings):
-    # Load from environment + optional .env
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_resolve_env_files() or ".env",
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -18,9 +38,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = Field(default="OCR Agent")
     API_V1_STR: str = Field(default="/api/v1")
 
-    # CORS (your frontend is typically on Vite:5173)
-    # You can override in .env as JSON:
-    # BACKEND_CORS_ORIGINS='["http://localhost:5173","http://127.0.0.1:5173"]'
+    # CORS (frontend typically on Vite:5173). Override in .env as JSON.
     BACKEND_CORS_ORIGINS: List[str] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )
@@ -29,8 +47,7 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = Field(default="uploads")
     MAX_FILE_SIZE_MB: int = Field(default=20, ge=1)
 
-    # Document safety limits (backend hardening)
-    # NOTE: these are enforced BEFORE heavy OCR to avoid resource exhaustion.
+    # Document safety limits
     MAX_PAGES_PER_DOC: int = Field(default=50, ge=1)
     MAX_IMAGE_MEGAPIXELS: float = Field(default=20.0, ge=1.0)
 
@@ -40,6 +57,9 @@ class Settings(BaseSettings):
     # Optional engine orchestration settings
     ENABLE_DOCTR: bool = Field(default=False)
     ENABLE_TROCR: bool = Field(default=False)
+    ENABLE_FORM_BOX_OCR: bool = Field(default=False)
+    ENABLE_CHECKBOX_DETECTION: bool = Field(default=False)
+
     ENGINE_TIMEOUT_DOCTR_S: int = Field(default=25, ge=1)
     ENGINE_TIMEOUT_TROCR_S: int = Field(default=25, ge=1)
     ORCH_MAX_TROCR_REGIONS: int = Field(default=12, ge=1)

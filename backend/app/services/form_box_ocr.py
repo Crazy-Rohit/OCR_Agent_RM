@@ -4,7 +4,10 @@ from dataclasses import dataclass
 from typing import Tuple, Optional
 from PIL import Image
 
-import cv2
+try:
+    import cv2  # type: ignore
+except Exception:
+    cv2 = None  # type: ignore
 import numpy as np
 import pytesseract
 from typing import List, Dict, Any
