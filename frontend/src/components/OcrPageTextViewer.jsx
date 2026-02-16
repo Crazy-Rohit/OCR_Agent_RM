@@ -44,7 +44,7 @@ export default function OcrPageTextViewer() {
   const [activeIndex, setActiveIndex] = useState(0);
   const [activePage, setActivePage] = useState(1);
 
-  const [viewMode, setViewMode] = useState("markdown"); // markdown | blocks | tables | page | raw
+  const [viewMode, setViewMode] = useState("markdown"); // markdown | blocks | tables | page | diagnostics | raw
   const [running, setRunning] = useState(false);
 
   const active = results[activeIndex]?.response || null;
@@ -136,10 +136,14 @@ export default function OcrPageTextViewer() {
     const hasDocument = !!active?.document;
     const hasMarkdown = !!active?.document?.markdown;
     const hasTables = Array.isArray(active?.document?.tables) && active.document.tables.length > 0;
+    const hasPageMeta = !!pages?.length;
     return (
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 10 }}>
         <button onClick={() => setViewMode("page")} disabled={!active}>
           Page Text
+        </button>
+        <button onClick={() => setViewMode("diagnostics")} disabled={!active || !hasPageMeta}>
+          Diagnostics
         </button>
         <button onClick={() => setViewMode("raw")} disabled={!active}>
           Raw JSON
@@ -301,6 +305,54 @@ export default function OcrPageTextViewer() {
     }
 
     if (!active) return <div style={{ opacity: 0.8 }}>Select multiple files (Ctrl/Shift) and click Run OCR.</div>;
+
+    if (viewMode === "diagnostics") {
+      const page = pages.find((p) => p.page_number === activePage) || pages[0] || {};
+      const engineUsage = page?.engine_usage || {};
+      const diagnostics = page?.diagnostics || {};
+      const docDiag = active?.document?.diagnostics || {};
+
+      const hasAny =
+        (engineUsage && Object.keys(engineUsage).length) ||
+        (diagnostics && Object.keys(diagnostics).length) ||
+        (docDiag && Object.keys(docDiag).length);
+
+      if (!hasAny) {
+        return <div style={{ opacity: 0.8 }}>No diagnostics/engine usage found in the response.</div>;
+      }
+
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ border: "1px solid #eee", borderRadius: 10, padding: 10 }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Page engine_usage (page {activePage})</div>
+            <pre style={{ whiteSpace: "pre-wrap", background: "#f6f6f6", padding: 10, borderRadius: 8, margin: 0 }}>
+              {prettyJson(engineUsage)}
+            </pre>
+            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.9 }}>
+              Quick read:
+              <span style={{ fontFamily: "monospace" }}>
+                {" "}
+                trocr={String(engineUsage?.trocr)} (enabled={String(engineUsage?.trocr_enabled)}, available={String(engineUsage?.trocr_available)}, skip_reason={String(engineUsage?.trocr_skip_reason)})
+              </span>
+            </div>
+          </div>
+
+          <div style={{ border: "1px solid #eee", borderRadius: 10, padding: 10 }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Page diagnostics</div>
+            <pre style={{ whiteSpace: "pre-wrap", background: "#f6f6f6", padding: 10, borderRadius: 8, margin: 0 }}>
+              {prettyJson(diagnostics)}
+            </pre>
+          </div>
+
+          <div style={{ border: "1px solid #eee", borderRadius: 10, padding: 10 }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>Document diagnostics</div>
+            <pre style={{ whiteSpace: "pre-wrap", background: "#f6f6f6", padding: 10, borderRadius: 8, margin: 0 }}>
+              {prettyJson(docDiag)}
+            </pre>
+          </div>
+        </div>
+      );
+    }
 
     if (viewMode === "raw") {
       return (

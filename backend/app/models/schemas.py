@@ -23,6 +23,11 @@ class OCRBlock(BaseModel):
 class PageText(BaseModel):
     page_number: int
     text: str = ""
+
+    # Debug/telemetry (front-end Diagnostics tab)
+    engine_usage: Dict[str, Any] = Field(default_factory=dict)
+    diagnostics: Dict[str, Any] = Field(default_factory=dict)
+
     # Phase 1
     words: List[Dict[str, Any]] = Field(default_factory=list)
     # Phase 2

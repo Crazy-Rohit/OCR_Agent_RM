@@ -57,6 +57,13 @@ class NormPage(BaseModel):
     routing: Dict[str, Any] = Field(default_factory=dict)
 
 
+    # Engine provenance per-page (populated by engine_orchestrator)
+    engine_usage: Dict[str, Any] = Field(default_factory=dict)
+
+    # Per-page diagnostics (errors, skip reasons, debug metrics)
+    diagnostics: Dict[str, Any] = Field(default_factory=dict)
+
+
 class NormTableCell(BaseModel):
     row: int
     col: int

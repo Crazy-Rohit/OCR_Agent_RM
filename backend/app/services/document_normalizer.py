@@ -15,6 +15,7 @@ from app.models.document_model import (
 from app.services.semantic_cleanup_v2 import normalize_text, split_list_marker
 from app.services.routing import classify_page
 from app.services.handwriting_detection import detect_handwriting_block, aggregate_page_script
+from app.utils.geometry import normalize_bbox_dict, bbox_to_tuple
 from app.services.table_candidates import mark_table_candidates
 try:
     from app.services.table_extraction import extract_tables_from_blocks
@@ -113,7 +114,7 @@ def normalize_document(pages: List[Dict[str, Any]], *, full_text: str) -> Docume
                     text=block_text,
                     text_normalized=block_text_norm,
                     lines=lines,
-                    bbox=b.get("bbox") or {},
+                    bbox=normalize_bbox_dict(b.get("bbox") or {}),
                     level=level,
                     marker=marker,
                     table_candidate=bool(b.get("table_candidate")),
@@ -187,9 +188,11 @@ def normalize_document(pages: List[Dict[str, Any]], *, full_text: str) -> Docume
                 continue
             # label-ish patterns common in forms
             if t.endswith(":") or any(k in t.lower() for k in ["policy", "name", "address", "city", "id no", "certificate", "phone", "date"]):
-                bb = blk.bbox or {}
-                x1 = int(bb.get("x1", 0)); y1 = int(bb.get("y1", 0)); x2 = int(bb.get("x2", 0)); y2 = int(bb.get("y2", 0))
-                labels.append((bi, t.rstrip(" :"), (x1,y1,x2,y2)))
+                bbt = bbox_to_tuple(blk.bbox or {})
+                if not bbt:
+                    continue
+                x1, y1, x2, y2 = bbt
+                labels.append((bi, t.rstrip(" :"), (x1, y1, x2, y2)))
 
         for blk in pg.blocks:
             if not blk.form_box_region:
@@ -197,8 +200,10 @@ def normalize_document(pages: List[Dict[str, Any]], *, full_text: str) -> Docume
             val = (blk.text_normalized or blk.text or "").strip()
             if not val:
                 continue
-            bb = blk.bbox or {}
-            vx1 = int(bb.get("x1", 0)); vy1 = int(bb.get("y1", 0)); vx2 = int(bb.get("x2", 0)); vy2 = int(bb.get("y2", 0))
+            bbt = bbox_to_tuple(blk.bbox or {})
+            if not bbt:
+                continue
+            vx1, vy1, vx2, vy2 = bbt
             vcy = (vy1+vy2)//2
 
             best = None

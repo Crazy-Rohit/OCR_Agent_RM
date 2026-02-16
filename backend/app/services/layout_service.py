@@ -74,7 +74,7 @@ class Line:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "text": line_text_from_words(self.words),
-            "bbox": {"left": self.left, "top": self.top, "right": self.right, "bottom": self.bottom},
+            "bbox": {"x1": self.left, "y1": self.top, "x2": self.right, "y2": self.bottom, "left": self.left, "top": self.top, "right": self.right, "bottom": self.bottom},
             "words": self.words,
         }
 
@@ -173,7 +173,7 @@ def build_blocks(lines: List[Line]) -> List[Dict[str, Any]]:
         l, t, r, b = cur_bbox
         blocks.append({
             "text": block_text,
-            "bbox": {"left": l, "top": t, "right": r, "bottom": b},
+            "bbox": {"x1": l, "y1": t, "x2": r, "y2": b, "left": l, "top": t, "right": r, "bottom": b},
             "lines": [ln.to_dict() for ln in cur_lines],
         })
 
